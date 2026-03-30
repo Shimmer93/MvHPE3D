@@ -1,0 +1,9 @@
+name: "stage1_mlp_fusion"
+input_dim: 79
+betas_dim: 10
+body_pose_dim: 69
+hidden_dim: 256
+latent_dim: 256
+encoder_layers: 2
+decoder_layers: 2
+dropout: 0.0

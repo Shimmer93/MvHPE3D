@@ -1,0 +1,12 @@
+name: "humman_stage1"
+manifest_path: "configs/data/humman_stage1_manifest.example.json"
+num_views: 2
+batch_size: 16
+num_workers: 0
+train_split: "train"
+val_split: "val"
+test_split: "test"
+seed: 0
+pin_memory: true
+persistent_workers: false
+drop_last_train: true

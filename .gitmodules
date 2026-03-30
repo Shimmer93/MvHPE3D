@@ -1,0 +1,6 @@
+[submodule "external/sam-3d-body"]
+	path = external/sam-3d-body
+	url = https://github.com/Shimmer93/sam-3d-body
+[submodule "external/MHR"]
+	path = external/MHR
+	url = https://github.com/facebookresearch/MHR.git

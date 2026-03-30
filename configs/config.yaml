@@ -1,0 +1,7 @@
+# Root training configuration placeholder.
+#
+# This repository does not yet enforce a config framework. The files in this
+# directory document the intended split between data, model, trainer, and
+# experiment presets so future entrypoints can compose them cleanly.
+
+experiment: "stage1_cross_camera"

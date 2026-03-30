@@ -1,0 +1,21 @@
+{
+  "samples": [
+    {
+      "sample_id": "subject01_seq01_frame000001",
+      "sequence_id": "subject01_seq01",
+      "frame_id": "000001",
+      "split": "train",
+      "target_path": "/path/to/canonical_target_or_reference_view.npz",
+      "views": [
+        {
+          "camera_id": "kinect_000",
+          "npz_path": "/path/to/predictions/kinect_000/subject01_seq01_frame000001.npz"
+        },
+        {
+          "camera_id": "kinect_002",
+          "npz_path": "/path/to/predictions/kinect_002/subject01_seq01_frame000001.npz"
+        }
+      ]
+    }
+  ]
+}
