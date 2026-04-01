@@ -14,9 +14,9 @@ from ..components import MLP, MeanSetPooling
 class Stage1MLPFusionConfig:
     """Configuration for the Stage 1 baseline fusion model."""
 
-    input_dim: int = 79
-    betas_dim: int = 10
-    body_pose_dim: int = 69
+    input_dim: int = 249
+    mhr_dim: int = 204
+    shape_dim: int = 45
     hidden_dim: int = 256
     latent_dim: int = 256
     encoder_layers: int = 2
@@ -31,7 +31,7 @@ class Stage1MLPFusionModel(nn.Module):
         super().__init__()
         self.config = config
 
-        output_dim = config.betas_dim + config.body_pose_dim
+        output_dim = config.mhr_dim + config.shape_dim
 
         self.view_encoder = MLP(
             input_dim=config.input_dim,
@@ -62,12 +62,12 @@ class Stage1MLPFusionModel(nn.Module):
         fused_feature = self.pool(encoded_views)
         fused_output = self.decoder(fused_feature)
 
-        split_index = self.config.betas_dim
-        pred_betas = fused_output[:, :split_index]
-        pred_body_pose = fused_output[:, split_index:]
+        split_index = self.config.mhr_dim
+        pred_mhr_params = fused_output[:, :split_index]
+        pred_shape_params = fused_output[:, split_index:]
 
         return {
-            "pred_betas": pred_betas,
-            "pred_body_pose": pred_body_pose,
+            "pred_mhr_params": pred_mhr_params,
+            "pred_shape_params": pred_shape_params,
             "fused_feature": fused_feature,
         }

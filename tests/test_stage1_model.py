@@ -22,10 +22,10 @@ def _load_train_script_module():
 
 def test_stage1_model_forward_shapes() -> None:
     model = Stage1MLPFusionModel(Stage1MLPFusionConfig())
-    outputs = model.forward(__import__("torch").zeros(2, 3, 79))
+    outputs = model.forward(__import__("torch").zeros(2, 3, 249))
 
-    assert tuple(outputs["pred_betas"].shape) == (2, 10)
-    assert tuple(outputs["pred_body_pose"].shape) == (2, 69)
+    assert tuple(outputs["pred_mhr_params"].shape) == (2, 204)
+    assert tuple(outputs["pred_shape_params"].shape) == (2, 45)
     assert tuple(outputs["fused_feature"].shape) == (2, 256)
 
 
@@ -52,7 +52,7 @@ def test_load_experiment_config_resolves_sections() -> None:
 
     assert experiment["experiment_name"] == "stage1_cross_camera"
     assert experiment["data"]["manifest_path"].endswith("humman_stage1_manifest.example.json")
-    assert experiment["model"]["input_dim"] == 79
+    assert experiment["model"]["input_dim"] == 249
     assert experiment["trainer"]["max_epochs"] == 100
 
 

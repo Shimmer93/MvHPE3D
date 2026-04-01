@@ -18,9 +18,9 @@ class HuMManStage1Dataset(Dataset[dict[str, Any]]):
     """Dataset for Stage 1 canonical body fusion.
 
     Each returned sample follows the schema:
-    - ``views_input``: tensor of shape ``[N, D]`` from per-view betas + body pose
-    - ``target_betas``: canonical target betas
-    - ``target_body_pose``: canonical target body pose
+    - ``views_input``: tensor of shape ``[N, D]`` from per-view mhr_model_params + shape_params
+    - ``target_mhr_params``: canonical target MHR model parameters
+    - ``target_shape_params``: canonical target shape parameters
     - ``view_aux``: per-view visualization fields
     - ``meta``: identifiers and camera names kept as Python data
     """
@@ -49,7 +49,6 @@ class HuMManStage1Dataset(Dataset[dict[str, Any]]):
 
         view_inputs = []
         view_aux = {
-            "smpl_global_orient": [],
             "pred_cam_t": [],
             "cam_int": [],
             "image_size": [],
@@ -59,9 +58,6 @@ class HuMManStage1Dataset(Dataset[dict[str, Any]]):
         for view in selected_views:
             payload = self._load_npz(view.npz_path)
             view_inputs.append(self._build_stage1_input(payload))
-            view_aux["smpl_global_orient"].append(
-                self._require_field(payload, "smpl_global_orient", expected_last_dim=3)
-            )
             view_aux["pred_cam_t"].append(
                 self._require_field(payload, "pred_cam_t", expected_last_dim=3)
             )
@@ -73,18 +69,16 @@ class HuMManStage1Dataset(Dataset[dict[str, Any]]):
 
         target_payload = self._load_target_payload(record)
         canonical_target = canonicalize_stage1_target(
-            smpl_betas=self._require_field(target_payload, "smpl_betas"),
-            smpl_body_pose=self._require_field(
-                target_payload, "smpl_body_pose", expected_last_dim=69
+            mhr_model_params=self._require_field(target_payload, "mhr_model_params"),
+            shape_params=self._require_field(
+                target_payload, "shape_params", expected_last_dim=45
             ),
-            smpl_global_orient=target_payload.get("smpl_global_orient"),
-            smpl_transl=target_payload.get("smpl_transl"),
         )
 
         return {
             "views_input": torch.from_numpy(np.stack(view_inputs, axis=0)),
-            "target_betas": torch.from_numpy(canonical_target["target_betas"]),
-            "target_body_pose": torch.from_numpy(canonical_target["target_body_pose"]),
+            "target_mhr_params": torch.from_numpy(canonical_target["target_mhr_params"]),
+            "target_shape_params": torch.from_numpy(canonical_target["target_shape_params"]),
             "view_aux": {
                 key: torch.from_numpy(np.stack(values, axis=0))
                 for key, values in view_aux.items()
@@ -158,6 +152,6 @@ class HuMManStage1Dataset(Dataset[dict[str, Any]]):
         return np.ascontiguousarray(value)
 
     def _build_stage1_input(self, payload: dict[str, np.ndarray]) -> np.ndarray:
-        betas = self._require_field(payload, "smpl_betas")
-        body_pose = self._require_field(payload, "smpl_body_pose", expected_last_dim=69)
-        return np.concatenate([betas, body_pose], axis=-1).astype(np.float32, copy=False)
+        mhr_params = self._require_field(payload, "mhr_model_params")
+        shape_params = self._require_field(payload, "shape_params", expected_last_dim=45)
+        return np.concatenate([mhr_params, shape_params], axis=-1).astype(np.float32, copy=False)

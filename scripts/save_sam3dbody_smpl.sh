@@ -5,5 +5,6 @@ CUDA_VISIBLE_DEVICES=1 MOMENTUM_ENABLED=0 uv run python external/sam-3d-body/dem
     --output_folder /opt/data/humman_cropped/sam3dbody \
     --checkpoint_path /opt/data/SAM_3dbody_checkpoints/model.ckpt \
     --mhr_path /opt/data/SAM_3dbody_checkpoints/assets/mhr_model.pt \
-    --export_smpl_params \
-    --smpl_model_path /home/zpengac/mmhpe/MmMvHPE/weights/smpl/SMPL_NEUTRAL.pkl
+    --detector_name "" \
+    --inference_type body \
+    --batch_size 16

@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 import lightning as L
 import torch
 
-from mvhpe3d.losses import Stage1LossConfig, Stage1SMPLLoss
+from mvhpe3d.losses import Stage1LossConfig, Stage1Loss
 from mvhpe3d.models import Stage1MLPFusionConfig, Stage1MLPFusionModel
 
 
@@ -35,7 +35,7 @@ class Stage1FusionLightningModule(L.LightningModule):
         self.optimization_config = optimization_config or Stage1OptimizationConfig()
 
         self.model = Stage1MLPFusionModel(self.model_config)
-        self.criterion = Stage1SMPLLoss(self.loss_config)
+        self.criterion = Stage1Loss(self.loss_config)
 
         self.save_hyperparameters(
             {
@@ -84,8 +84,8 @@ class Stage1FusionLightningModule(L.LightningModule):
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         predictions = self(batch["views_input"])
         return {
-            "pred_betas": predictions["pred_betas"],
-            "pred_body_pose": predictions["pred_body_pose"],
+            "pred_mhr_params": predictions["pred_mhr_params"],
+            "pred_shape_params": predictions["pred_shape_params"],
             "meta": batch["meta"],
         }
 
@@ -99,15 +99,15 @@ class Stage1FusionLightningModule(L.LightningModule):
     def _shared_step(self, batch, *, stage: str) -> dict[str, torch.Tensor]:
         predictions = self(batch["views_input"])
         losses = self.criterion(
-            pred_betas=predictions["pred_betas"],
-            pred_body_pose=predictions["pred_body_pose"],
-            target_betas=batch["target_betas"],
-            target_body_pose=batch["target_body_pose"],
+            pred_mhr_params=predictions["pred_mhr_params"],
+            pred_shape_params=predictions["pred_shape_params"],
+            target_mhr_params=batch["target_mhr_params"],
+            target_shape_params=batch["target_shape_params"],
         )
         return {
             f"{stage}/loss": losses["loss"],
-            f"{stage}/loss_betas": losses["loss_betas"],
-            f"{stage}/loss_body_pose": losses["loss_body_pose"],
+            f"{stage}/loss_mhr_params": losses["loss_mhr_params"],
+            f"{stage}/loss_shape_params": losses["loss_shape_params"],
         }
 
     def _log_metrics_if_possible(

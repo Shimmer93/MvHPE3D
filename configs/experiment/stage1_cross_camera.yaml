@@ -7,8 +7,8 @@ model:
   config: "configs/model/stage1_mlp.yaml"
 
 loss:
-  betas_weight: 1.0
-  body_pose_weight: 1.0
+  mhr_weight: 1.0
+  shape_weight: 1.0
 
 optimizer:
   learning_rate: 0.001

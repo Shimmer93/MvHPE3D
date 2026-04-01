@@ -22,10 +22,9 @@ def test_humman_stage1_dataset_returns_expected_schema(sample_manifest: Path) ->
 
     sample = dataset[0]
 
-    assert tuple(sample["views_input"].shape) == (2, 79)
-    assert tuple(sample["target_betas"].shape) == (10,)
-    assert tuple(sample["target_body_pose"].shape) == (69,)
-    assert tuple(sample["view_aux"]["smpl_global_orient"].shape) == (2, 3)
+    assert tuple(sample["views_input"].shape) == (2, 249)
+    assert tuple(sample["target_mhr_params"].shape) == (204,)
+    assert tuple(sample["target_shape_params"].shape) == (45,)
     assert tuple(sample["view_aux"]["pred_cam_t"].shape) == (2, 3)
     assert tuple(sample["view_aux"]["cam_int"].shape) == (2, 3, 3)
     assert tuple(sample["view_aux"]["image_size"].shape) == (2, 2)
@@ -50,9 +49,9 @@ def test_stage1_datamodule_builds_train_val_and_test_batches(sample_manifest: Pa
     val_batch = next(iter(datamodule.val_dataloader()))
     test_batch = next(iter(datamodule.test_dataloader()))
 
-    assert tuple(train_batch["views_input"].shape) == (1, 2, 79)
-    assert tuple(val_batch["views_input"].shape) == (1, 2, 79)
-    assert tuple(test_batch["views_input"].shape) == (1, 2, 79)
+    assert tuple(train_batch["views_input"].shape) == (1, 2, 249)
+    assert tuple(val_batch["views_input"].shape) == (1, 2, 249)
+    assert tuple(test_batch["views_input"].shape) == (1, 2, 249)
     assert train_batch["meta"][0]["sample_id"] == "sample_train"
     assert val_batch["meta"][0]["sample_id"] == "sample_val"
     assert test_batch["meta"][0]["sample_id"] == "sample_test"

@@ -9,9 +9,8 @@ import pytest
 
 def _write_prediction_npz(path: Path) -> None:
     payload = {
-        "smpl_betas": np.zeros(10, dtype=np.float32),
-        "smpl_body_pose": np.zeros(69, dtype=np.float32),
-        "smpl_global_orient": np.zeros(3, dtype=np.float32),
+        "mhr_model_params": np.zeros(204, dtype=np.float32),
+        "shape_params": np.zeros(45, dtype=np.float32),
         "pred_cam_t": np.array([0.1, 0.2, 2.0], dtype=np.float32),
         "cam_int": np.eye(3, dtype=np.float32),
         "image_size": np.array([224, 224], dtype=np.float32),
@@ -21,10 +20,8 @@ def _write_prediction_npz(path: Path) -> None:
 
 def _write_target_npz(path: Path) -> None:
     payload = {
-        "smpl_betas": np.zeros(10, dtype=np.float32),
-        "smpl_body_pose": np.zeros(69, dtype=np.float32),
-        "smpl_global_orient": np.zeros(3, dtype=np.float32),
-        "smpl_transl": np.zeros(3, dtype=np.float32),
+        "mhr_model_params": np.zeros(204, dtype=np.float32),
+        "shape_params": np.zeros(45, dtype=np.float32),
     }
     np.savez(path, **payload)
 
