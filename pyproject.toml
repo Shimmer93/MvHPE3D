@@ -22,6 +22,7 @@ dependencies = [
     "hydra-submitit-launcher>=1.2.0",
     "joblib>=1.5.3",
     "jsonlines>=4.0.0",
+    "lightning>=2.6.1",
     "loguru>=0.7.3",
     "mhr",
     "moge",

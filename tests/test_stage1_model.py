@@ -96,3 +96,33 @@ def test_train_script_build_data_config_overrides_split_selection() -> None:
 
     assert data_config.split_config_path == "configs/data/humman_stage1_splits.yaml"
     assert data_config.split_name == "random_split"
+
+
+def test_train_script_build_trainer_config_overrides_multi_gpu_settings() -> None:
+    train_module = _load_train_script_module()
+    args = Namespace(
+        manifest_path=None,
+        split_config_path=None,
+        split_name=None,
+        seed=None,
+        fast_dev_run=False,
+        max_epochs=50,
+        accelerator="gpu",
+        devices="2",
+        strategy="ddp",
+        num_nodes=1,
+        default_root_dir="outputs/stage1",
+        config="configs/experiment/stage1_cross_camera.yaml",
+    )
+
+    trainer_config = train_module.build_trainer_config(
+        {"devices": 1, "accelerator": "auto"},
+        args,
+        "stage1_cross_camera",
+    )
+
+    assert trainer_config["max_epochs"] == 50
+    assert trainer_config["accelerator"] == "gpu"
+    assert trainer_config["devices"] == 2
+    assert trainer_config["strategy"] == "ddp"
+    assert trainer_config["num_nodes"] == 1

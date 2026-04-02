@@ -86,6 +86,19 @@ reproducible repository state rather than an untracked local script.
    - In Stage 1, `smpl_global_orient + pred_cam_t` are kept for visualization only and are not used as model inputs or supervision targets
    - The training manifest is a split-agnostic sample inventory. Optional fields such as `split`, `subject_id`, and `action_id` are metadata used by split policies, not fixed train/val ownership.
 
+3. Build the Stage 1 manifest from the exported `.npz` predictions:
+
+```bash
+uv run python scripts/build_humman_stage1_manifest.py \
+  --predictions-dir /opt/data/humman_cropped/sam3dbody \
+  --output-path /opt/data/humman_cropped/humman_stage1_manifest.json \
+  --min-views 2
+```
+
+This keeps only valid single-person exports and groups them by
+`sequence_id + frame_id`. If `target_path` is omitted, the current dataset code
+falls back to the first exported view as the training target.
+
 **Assumption**: Single person per sequence. No cross-view person association is needed.
 
 ## Training
@@ -114,6 +127,16 @@ bash scripts/train_fusion.sh \
 
 The default split policy file is `configs/data/humman_stage1_splits.yaml`. It
 contains named policies such as `cross_camera_split` and `random_split`.
+
+For multi-GPU training, forward Lightning trainer overrides from the CLI:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 bash scripts/train_fusion.sh \
+  --manifest-path /path/to/humman_stage1_manifest.json \
+  --accelerator gpu \
+  --devices 2 \
+  --strategy ddp
+```
 
 **Sampling protocols**:
 - `cross_camera_split` (main): train on `{kinect_000, 002, 003, 004, 005, 006, 008, iphone}`, val on `{kinect_001, 007, 009}`

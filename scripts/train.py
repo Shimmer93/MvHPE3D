@@ -4,12 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Any
 
 import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 from mvhpe3d.data import Stage1DataConfig, Stage1HuMManDataModule
 from mvhpe3d.lightning import Stage1FusionLightningModule, Stage1OptimizationConfig
@@ -55,6 +61,30 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Optional override for trainer.max_epochs",
+    )
+    parser.add_argument(
+        "--accelerator",
+        type=str,
+        default=None,
+        help="Optional override for trainer.accelerator",
+    )
+    parser.add_argument(
+        "--devices",
+        type=str,
+        default=None,
+        help="Optional override for trainer.devices, e.g. 2, auto, or 0,1",
+    )
+    parser.add_argument(
+        "--strategy",
+        type=str,
+        default=None,
+        help="Optional override for trainer.strategy, e.g. ddp",
+    )
+    parser.add_argument(
+        "--num-nodes",
+        type=int,
+        default=None,
+        help="Optional override for trainer.num_nodes",
     )
     parser.add_argument(
         "--seed",
@@ -129,6 +159,14 @@ def build_trainer_config(
 
     if args.max_epochs is not None:
         trainer_kwargs["max_epochs"] = args.max_epochs
+    if args.accelerator is not None:
+        trainer_kwargs["accelerator"] = args.accelerator
+    if args.devices is not None:
+        trainer_kwargs["devices"] = _parse_devices_arg(args.devices)
+    if args.strategy is not None:
+        trainer_kwargs["strategy"] = args.strategy
+    if args.num_nodes is not None:
+        trainer_kwargs["num_nodes"] = args.num_nodes
     if args.fast_dev_run:
         trainer_kwargs["fast_dev_run"] = True
 
@@ -147,6 +185,15 @@ def build_trainer_config(
     trainer_kwargs["logger"] = logger
     trainer_kwargs["callbacks"] = [checkpoint]
     return trainer_kwargs
+
+
+def _parse_devices_arg(value: str) -> int | str | list[int]:
+    normalized = value.strip()
+    if normalized.isdigit():
+        return int(normalized)
+    if "," in normalized:
+        return [int(item.strip()) for item in normalized.split(",") if item.strip()]
+    return normalized
 
 
 if __name__ == "__main__":

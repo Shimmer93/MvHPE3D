@@ -22,6 +22,10 @@ Optional:
   --split-config-path PATH
                           Optional split policy YAML override.
   --split-name NAME       Optional named split policy override.
+  --accelerator VALUE     Forwarded to scripts/train.py.
+  --devices VALUE         Forwarded to scripts/train.py.
+  --strategy VALUE        Forwarded to scripts/train.py.
+  --num-nodes VALUE       Forwarded to scripts/train.py.
   --default-root-dir DIR  Output root for checkpoints and logs.
                           Default: outputs/stage1
   -h, --help              Show this help message.
@@ -34,6 +38,12 @@ Examples:
     --manifest-path /opt/data/humman_cropped/humman_stage1_manifest.json \
     --split-name random_split \
     --max-epochs 50
+
+  CUDA_VISIBLE_DEVICES=0,1 bash scripts/train_fusion.sh \
+    --manifest-path /opt/data/humman_cropped/humman_stage1_manifest.json \
+    --accelerator gpu \
+    --devices 2 \
+    --strategy ddp
 EOF
 }
 
@@ -114,6 +124,12 @@ if [[ ! -f "${REPO_ROOT}/${MANIFEST_PATH}" && ! -f "${MANIFEST_PATH}" ]]; then
 fi
 
 cd "${REPO_ROOT}"
+
+if [[ -n "${PYTHONPATH:-}" ]]; then
+    export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH}"
+else
+    export PYTHONPATH="${REPO_ROOT}/src"
+fi
 
 CMD=(
     uv run python scripts/train.py
