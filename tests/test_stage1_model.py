@@ -52,6 +52,7 @@ def test_load_experiment_config_resolves_sections() -> None:
 
     assert experiment["experiment_name"] == "stage1_cross_camera"
     assert experiment["data"]["manifest_path"].endswith("humman_stage1_manifest.example.json")
+    assert experiment["data"]["split_name"] == "cross_camera_split"
     assert experiment["model"]["input_dim"] == 249
     assert experiment["trainer"]["max_epochs"] == 100
 
@@ -60,6 +61,8 @@ def test_train_script_build_data_config_disables_drop_last_in_fast_dev_run() -> 
     train_module = _load_train_script_module()
     args = Namespace(
         manifest_path=None,
+        split_config_path=None,
+        split_name=None,
         seed=None,
         fast_dev_run=True,
         max_epochs=None,
@@ -72,3 +75,24 @@ def test_train_script_build_data_config_disables_drop_last_in_fast_dev_run() -> 
     )
 
     assert data_config.drop_last_train is False
+
+
+def test_train_script_build_data_config_overrides_split_selection() -> None:
+    train_module = _load_train_script_module()
+    args = Namespace(
+        manifest_path=None,
+        split_config_path="configs/data/humman_stage1_splits.yaml",
+        split_name="random_split",
+        seed=None,
+        fast_dev_run=False,
+        max_epochs=None,
+        default_root_dir="outputs/stage1",
+        config="configs/experiment/stage1_cross_camera.yaml",
+    )
+    data_config = train_module.build_data_config(
+        {"manifest_path": "dummy.json", "split_name": "cross_camera_split"},
+        args,
+    )
+
+    assert data_config.split_config_path == "configs/data/humman_stage1_splits.yaml"
+    assert data_config.split_name == "random_split"

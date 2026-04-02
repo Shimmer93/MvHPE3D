@@ -33,6 +33,18 @@ def parse_args() -> argparse.Namespace:
         help="Optional override for the data manifest path",
     )
     parser.add_argument(
+        "--split-config-path",
+        type=str,
+        default=None,
+        help="Optional override for the split policy YAML path",
+    )
+    parser.add_argument(
+        "--split-name",
+        type=str,
+        default=None,
+        help="Optional override for the named split policy in the split config YAML",
+    )
+    parser.add_argument(
         "--default-root-dir",
         type=str,
         default="outputs/stage1",
@@ -88,6 +100,10 @@ def build_data_config(config: dict[str, Any], args: argparse.Namespace) -> Stage
 
     if args.manifest_path is not None:
         data_kwargs["manifest_path"] = args.manifest_path
+    if args.split_config_path is not None:
+        data_kwargs["split_config_path"] = args.split_config_path
+    if args.split_name is not None:
+        data_kwargs["split_name"] = args.split_name
     if args.seed is not None:
         data_kwargs["seed"] = args.seed
     if args.fast_dev_run:

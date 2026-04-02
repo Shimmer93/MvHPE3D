@@ -4,7 +4,9 @@
       "sample_id": "subject01_seq01_frame000001",
       "sequence_id": "subject01_seq01",
       "frame_id": "000001",
-      "split": "train",
+      "split": "training",
+      "subject_id": "subject01",
+      "action_id": "action01",
       "target_path": "/path/to/canonical_target_or_reference_view.npz",
       "views": [
         {

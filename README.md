@@ -84,12 +84,36 @@ reproducible repository state rather than an untracked local script.
    - Input: cropped RGB images from `/opt/data/humman_cropped/rgb/`
    - Output per image used in this project: `smpl_betas`, `smpl_body_pose`, `smpl_global_orient`, `pred_cam_t`, `cam_int`, `image_size`
    - In Stage 1, `smpl_global_orient + pred_cam_t` are kept for visualization only and are not used as model inputs or supervision targets
+   - The training manifest is a split-agnostic sample inventory. Optional fields such as `split`, `subject_id`, and `action_id` are metadata used by split policies, not fixed train/val ownership.
 
 **Assumption**: Single person per sequence. No cross-view person association is needed.
 
 ## Training
 
 **Input**: Fixed `N` views per sample.
+
+Run the Stage 1 fusion baseline with:
+
+```bash
+bash scripts/train_fusion.sh \
+  --manifest-path /path/to/humman_stage1_manifest.json
+```
+
+This wrapper calls `scripts/train.py` with the default Stage 1 cross-camera
+experiment config and writes logs/checkpoints under `outputs/stage1/`. You can
+forward extra training flags such as `--max-epochs 50`, `--fast-dev-run`, or a
+custom `--default-root-dir`.
+
+To switch split protocols without regenerating the manifest:
+
+```bash
+bash scripts/train_fusion.sh \
+  --manifest-path /path/to/humman_stage1_manifest.json \
+  --split-name random_split
+```
+
+The default split policy file is `configs/data/humman_stage1_splits.yaml`. It
+contains named policies such as `cross_camera_split` and `random_split`.
 
 **Sampling protocols**:
 - `cross_camera_split` (main): train on `{kinect_000, 002, 003, 004, 005, 006, 008, iphone}`, val on `{kinect_001, 007, 009}`

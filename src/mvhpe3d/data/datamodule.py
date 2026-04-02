@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 
 from .collate import multiview_collate
 from .datasets import HuMManStage1Dataset
-from .splits import filter_records_by_split, load_sample_records
+from .splits import filter_records_by_split, load_sample_records, resolve_split_records
 
 
 @dataclass(slots=True)
@@ -18,6 +18,8 @@ class Stage1DataConfig:
     """Configuration for the Stage 1 HuMMan LightningDataModule."""
 
     manifest_path: str
+    split_config_path: str | None = None
+    split_name: str | None = None
     num_views: int = 2
     batch_size: int = 16
     num_workers: int = 0
@@ -44,19 +46,24 @@ class Stage1HuMManDataModule(L.LightningDataModule):
         manifest_path = Path(self.config.manifest_path)
         if not manifest_path.exists():
             raise FileNotFoundError(f"Manifest does not exist: {manifest_path}")
+        if self.config.split_config_path is not None:
+            split_config_path = Path(self.config.split_config_path)
+            if not split_config_path.exists():
+                raise FileNotFoundError(f"Split config does not exist: {split_config_path}")
 
     def setup(self, stage: str | None = None) -> None:
         records = load_sample_records(self.config.manifest_path)
+        selected_records = self._resolve_dataset_records(records)
 
         if stage in (None, "fit"):
             self.train_dataset = HuMManStage1Dataset(
-                filter_records_by_split(records, self.config.train_split),
+                selected_records["train"],
                 num_views=self.config.num_views,
                 train=True,
                 seed=self.config.seed,
             )
             self.val_dataset = HuMManStage1Dataset(
-                filter_records_by_split(records, self.config.val_split),
+                selected_records["val"],
                 num_views=self.config.num_views,
                 train=False,
                 seed=self.config.seed,
@@ -64,7 +71,7 @@ class Stage1HuMManDataModule(L.LightningDataModule):
 
         if stage in (None, "validate") and self.val_dataset is None:
             self.val_dataset = HuMManStage1Dataset(
-                filter_records_by_split(records, self.config.val_split),
+                selected_records["val"],
                 num_views=self.config.num_views,
                 train=False,
                 seed=self.config.seed,
@@ -72,7 +79,7 @@ class Stage1HuMManDataModule(L.LightningDataModule):
 
         if stage in (None, "test"):
             self.test_dataset = HuMManStage1Dataset(
-                filter_records_by_split(records, self.config.test_split),
+                selected_records["test"],
                 num_views=self.config.num_views,
                 train=False,
                 seed=self.config.seed,
@@ -116,3 +123,20 @@ class Stage1HuMManDataModule(L.LightningDataModule):
             drop_last=drop_last,
             collate_fn=multiview_collate,
         )
+
+    def _resolve_dataset_records(self, records: list) -> dict[str, list]:
+        if self.config.split_config_path is not None:
+            if self.config.split_name is None:
+                raise ValueError("split_name must be set when split_config_path is provided")
+            return resolve_split_records(
+                records,
+                split_config_path=self.config.split_config_path,
+                split_name=self.config.split_name,
+                num_views=self.config.num_views,
+            )
+
+        return {
+            "train": filter_records_by_split(records, self.config.train_split),
+            "val": filter_records_by_split(records, self.config.val_split),
+            "test": filter_records_by_split(records, self.config.test_split),
+        }
