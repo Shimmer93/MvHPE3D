@@ -99,6 +99,30 @@ def parse_args() -> argparse.Namespace:
         help="Optional override for the experiment seed",
     )
     parser.add_argument(
+        "--smpl-model-path",
+        type=str,
+        default=None,
+        help="Optional override for the neutral SMPL model used for validation metrics",
+    )
+    parser.add_argument(
+        "--mhr-assets-dir",
+        type=str,
+        default=None,
+        help="Optional override for the MHR asset directory used for test-time input conversion",
+    )
+    parser.add_argument(
+        "--test-after-train",
+        action="store_true",
+        help="Run a test pass immediately after training finishes",
+    )
+    parser.add_argument(
+        "--test-ckpt",
+        type=str,
+        choices=("best", "last", "current"),
+        default="best",
+        help="Checkpoint source to use for --test-after-train",
+    )
+    parser.add_argument(
         "--fast-dev-run",
         action="store_true",
         help="Run a single Lightning fast-dev-run iteration",
@@ -122,11 +146,19 @@ def main() -> None:
         model_config=model_config,
         loss_config=loss_config,
         optimization_config=optimization_config,
+        smpl_model_path=args.smpl_model_path,
+        mhr_assets_dir=args.mhr_assets_dir,
     )
 
     trainer_config = build_trainer_config(experiment["trainer"], args, experiment["experiment_name"])
     trainer = L.Trainer(**trainer_config)
     trainer.fit(module, datamodule=datamodule)
+    maybe_run_test_after_train(
+        trainer,
+        module=module,
+        datamodule=datamodule,
+        args=args,
+    )
 
 
 def build_data_config(config: dict[str, Any], args: argparse.Namespace) -> Stage1DataConfig:
@@ -179,9 +211,9 @@ def build_trainer_config(
         trainer_kwargs["fast_dev_run"] = True
 
     root_dir = Path(args.default_root_dir).resolve()
-    logger = CSVLogger(save_dir=str(root_dir / "logs"), name=experiment_name)
+    logger = CSVLogger(save_dir=str(root_dir), name=experiment_name)
     checkpoint = ModelCheckpoint(
-        dirpath=str(root_dir / "checkpoints" / experiment_name),
+        dirpath=str(Path(logger.log_dir) / "checkpoints"),
         filename="epoch{epoch:03d}-step{step:06d}",
         monitor="val/loss",
         mode="min",
@@ -202,6 +234,52 @@ def _parse_devices_arg(value: str) -> int | str | list[int]:
     if "," in normalized:
         return [int(item.strip()) for item in normalized.split(",") if item.strip()]
     return normalized
+
+
+def maybe_run_test_after_train(
+    trainer: L.Trainer,
+    *,
+    module: Stage1FusionLightningModule,
+    datamodule: Stage1HuMManDataModule,
+    args: argparse.Namespace,
+) -> None:
+    if not args.test_after_train:
+        return
+
+    ckpt_path = resolve_test_after_train_ckpt_path(
+        trainer,
+        requested=args.test_ckpt,
+    )
+    if ckpt_path is None:
+        print("Post-train test: using in-memory model weights")
+        trainer.test(module, datamodule=datamodule)
+        return
+
+    print(f"Post-train test: using checkpoint {ckpt_path}")
+    trainer.test(model=None, datamodule=datamodule, ckpt_path=ckpt_path)
+
+
+def resolve_test_after_train_ckpt_path(
+    trainer: L.Trainer,
+    *,
+    requested: str,
+) -> str | None:
+    if requested == "current":
+        return None
+
+    checkpoint_callback = getattr(trainer, "checkpoint_callback", None)
+    if checkpoint_callback is None:
+        if requested == "best":
+            return None
+        return "last"
+
+    if requested == "best":
+        best_model_path = getattr(checkpoint_callback, "best_model_path", "")
+        return best_model_path or None
+    if requested == "last":
+        last_model_path = getattr(checkpoint_callback, "last_model_path", "")
+        return last_model_path or None
+    return None
 
 
 if __name__ == "__main__":

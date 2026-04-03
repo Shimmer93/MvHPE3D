@@ -27,6 +27,9 @@ Optional:
   --devices VALUE         Forwarded to scripts/train.py.
   --strategy VALUE        Forwarded to scripts/train.py.
   --num-nodes VALUE       Forwarded to scripts/train.py.
+  --test-after-train      Forwarded to scripts/train.py.
+  --test-ckpt VALUE       Forwarded to scripts/train.py. One of: best, last, current.
+  --mhr-assets-dir PATH   Forwarded to scripts/train.py for test-time input conversion.
   --default-root-dir DIR  Output root for checkpoints and logs.
                           Default: outputs/stage1
   -h, --help              Show this help message.
@@ -49,6 +52,12 @@ Examples:
     --accelerator gpu \
     --devices 2 \
     --strategy ddp
+
+  bash scripts/train_fusion.sh \
+    --manifest-path /opt/data/humman_cropped/humman_stage1_manifest.json \
+    --gt-smpl-dir /opt/data/humman_cropped/smpl \
+    --test-after-train \
+    --test-ckpt best
 EOF
 }
 

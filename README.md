@@ -117,6 +117,21 @@ custom `--default-root-dir`. By default the datamodule looks for GT SMPL under
 `$(dirname manifest)/smpl`; override that with `--gt-smpl-dir /path/to/smpl`
 if your manifest lives elsewhere.
 
+To run a test pass automatically right after training:
+
+```bash
+bash scripts/train_fusion.sh \
+  --manifest-path /path/to/humman_stage1_manifest.json \
+  --gt-smpl-dir /path/to/humman_cropped/smpl \
+  --test-after-train \
+  --test-ckpt best
+```
+
+`--test-ckpt` accepts:
+- `best`: test the best validation checkpoint if available
+- `last`: test the last saved checkpoint if available
+- `current`: test the in-memory model weights directly
+
 To switch split protocols without regenerating the manifest:
 
 ```bash
@@ -148,8 +163,22 @@ To evaluate a trained checkpoint on the test split:
 uv run python scripts/test.py \
   --checkpoint-path /path/to/model.ckpt \
   --manifest-path /path/to/humman_stage1_manifest.json \
+  --gt-smpl-dir /path/to/humman_cropped/smpl \
   --stage test
 ```
+
+`scripts/test.py` now reports:
+- loss terms on canonical SMPL parameters
+- MPJPE from the first 24 SMPL joints
+- PA-MPJPE from the same 24 joints after Procrustes alignment
+- `input_avg_mpjpe` from the average of the per-view MHR inputs after MHR-to-SMPL conversion
+- `input_avg_pa_mpjpe` from the same converted per-view inputs after Procrustes alignment
+
+The joints are generated from predicted and GT SMPL bodies in canonical space,
+then pelvis-centered before metric computation.
+
+If the MHR assets are not under `/opt/data/assets`, pass
+`--mhr-assets-dir /path/to/mhr/assets`.
 
 To save a few prediction-vs-GT comparison visualizations:
 
@@ -189,8 +218,8 @@ into the image with HuMMan GT `global_orient`, `transl`, and camera calibration.
 
 ## Evaluation
 
-- MPJPE (Mean Per-Joint Position Error) in canonical space
-- PA-MPJPE (Procrustes-Aligned MPJPE) in canonical space
+- MPJPE (Mean Per-Joint Position Error) on the first 24 SMPL joints in canonical space
+- PA-MPJPE (Procrustes-Aligned MPJPE) on the same joints in canonical space
 - MVE (Mesh Vertex Error) in canonical space
 
 ## Visualization

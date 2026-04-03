@@ -18,7 +18,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from mvhpe3d.data import Stage1DataConfig, Stage1HuMManDataModule
 from mvhpe3d.lightning import Stage1FusionLightningModule
-from mvhpe3d.utils import load_experiment_config
+from mvhpe3d.utils import load_experiment_config, validate_mhr_asset_folder
 
 
 def parse_args() -> argparse.Namespace:
@@ -78,6 +78,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-nodes", type=int, default=None, help="Override trainer.num_nodes")
     parser.add_argument("--seed", type=int, default=None, help="Optional override for experiment seed")
     parser.add_argument(
+        "--smpl-model-path",
+        type=str,
+        default=None,
+        help="Optional override for the neutral SMPL model used for keypoint metrics",
+    )
+    parser.add_argument(
+        "--mhr-assets-dir",
+        type=str,
+        default=None,
+        help="Optional override for the MHR asset directory used for input-view conversion",
+    )
+    parser.add_argument(
         "--output-path",
         type=str,
         default=None,
@@ -91,6 +103,7 @@ def main() -> None:
     experiment = load_experiment_config(args.config)
     data_config = build_data_config(experiment["data"], args)
     trainer_config = build_eval_trainer_config(experiment["trainer"], args)
+    validate_optional_mhr_assets(args)
 
     if args.seed is not None:
         L.seed_everything(args.seed, workers=True)
@@ -101,6 +114,8 @@ def main() -> None:
     module = Stage1FusionLightningModule.load_from_checkpoint(
         args.checkpoint_path,
         map_location="cpu",
+        smpl_model_path=args.smpl_model_path,
+        mhr_assets_dir=args.mhr_assets_dir,
     )
 
     trainer = L.Trainer(**trainer_config)
@@ -168,6 +183,12 @@ def parse_devices_arg(value: str) -> int | str | list[int]:
     if "," in normalized:
         return [int(item.strip()) for item in normalized.split(",") if item.strip()]
     return normalized
+
+
+def validate_optional_mhr_assets(args: argparse.Namespace) -> None:
+    if args.stage != "test":
+        return
+    validate_mhr_asset_folder(args.mhr_assets_dir or "/opt/data/assets")
 
 
 if __name__ == "__main__":

@@ -5,15 +5,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
-import os
 import sys
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
-import smplx
 import torch
 from torch.utils.data import DataLoader
 
@@ -24,7 +21,11 @@ if str(SRC_ROOT) not in sys.path:
 
 from mvhpe3d.data import Stage1DataConfig, Stage1HuMManDataModule, multiview_collate
 from mvhpe3d.lightning import Stage1FusionLightningModule
-from mvhpe3d.utils import load_experiment_config
+from mvhpe3d.utils import (
+    build_smpl_model,
+    load_experiment_config,
+    resolve_smpl_model_path as resolve_smpl_model_path_impl,
+)
 from mvhpe3d.visualization import (
     load_camera_parameters,
     overlay_mask_on_image,
@@ -161,11 +162,11 @@ def main() -> None:
         name="cameras",
     )
     smpl_model_path = resolve_smpl_model_path(args.smpl_model_path)
-    smpl_model = smplx.SMPL(
-        model_path=str(smpl_model_path),
-        gender="neutral",
+    smpl_model = build_smpl_model(
+        device=device,
+        smpl_model_path=str(smpl_model_path),
         batch_size=1,
-    ).to(device)
+    )
     faces = np.asarray(smpl_model.faces, dtype=np.int32)
 
     written = 0
@@ -246,23 +247,7 @@ def resolve_required_dir(path_arg: str | None, *, fallback: Path, name: str) -> 
 
 
 def resolve_smpl_model_path(path_arg: str | None) -> Path:
-    if path_arg is not None:
-        resolved = Path(path_arg).resolve()
-        if not resolved.exists():
-            raise FileNotFoundError(f"SMPL model does not exist: {resolved}")
-        return resolved
-
-    candidates = [
-        Path("/opt/data/weights/smpl/SMPL_NEUTRAL.pkl"),
-        Path("/opt/data/weights/SMPL_NEUTRAL.pkl"),
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate.resolve()
-
-    raise FileNotFoundError(
-        "Could not resolve an SMPL model. Pass --smpl-model-path explicitly."
-    )
+    return resolve_smpl_model_path_impl(path_arg)
 
 
 def save_sample_outputs(

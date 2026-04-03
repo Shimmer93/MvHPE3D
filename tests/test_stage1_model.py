@@ -47,6 +47,78 @@ def test_stage1_lightning_module_training_step(sample_manifest: Path) -> None:
     assert loss.ndim == 0
 
 
+def test_stage1_lightning_module_validation_step_adds_joint_metrics(
+    sample_manifest: Path,
+    monkeypatch,
+) -> None:
+    datamodule = Stage1HuMManDataModule(
+        Stage1DataConfig(
+            manifest_path=str(sample_manifest),
+            num_views=2,
+            batch_size=1,
+            drop_last_train=False,
+        )
+    )
+    datamodule.setup("fit")
+    batch = next(iter(datamodule.val_dataloader()))
+
+    module = Stage1FusionLightningModule(model_config=Stage1MLPFusionConfig())
+    monkeypatch.setattr(
+        module,
+        "_compute_joint_metrics",
+        lambda **_: {
+            "mpjpe": __import__("torch").tensor(12.0),
+            "pa_mpjpe": __import__("torch").tensor(7.0),
+        },
+    )
+
+    metrics = module._shared_step(batch, stage="val")
+
+    assert metrics["val/mpjpe"].item() == 12.0
+    assert metrics["val/pa_mpjpe"].item() == 7.0
+
+
+def test_stage1_lightning_module_test_step_adds_input_view_metrics(
+    sample_manifest: Path,
+    monkeypatch,
+) -> None:
+    datamodule = Stage1HuMManDataModule(
+        Stage1DataConfig(
+            manifest_path=str(sample_manifest),
+            num_views=2,
+            batch_size=1,
+            drop_last_train=False,
+        )
+    )
+    datamodule.setup("test")
+    batch = next(iter(datamodule.test_dataloader()))
+
+    module = Stage1FusionLightningModule(model_config=Stage1MLPFusionConfig())
+    monkeypatch.setattr(
+        module,
+        "_compute_joint_metrics",
+        lambda **_: {
+            "mpjpe": __import__("torch").tensor(12.0),
+            "pa_mpjpe": __import__("torch").tensor(7.0),
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "_compute_input_view_joint_metrics",
+        lambda **_: {
+            "mpjpe": __import__("torch").tensor(21.0),
+            "pa_mpjpe": __import__("torch").tensor(11.0),
+        },
+    )
+
+    metrics = module._shared_step(batch, stage="test")
+
+    assert metrics["test/mpjpe"].item() == 12.0
+    assert metrics["test/pa_mpjpe"].item() == 7.0
+    assert metrics["test/input_avg_mpjpe"].item() == 21.0
+    assert metrics["test/input_avg_pa_mpjpe"].item() == 11.0
+
+
 def test_load_experiment_config_resolves_sections() -> None:
     experiment = load_experiment_config("configs/experiment/stage1_cross_camera.yaml")
 
@@ -65,6 +137,8 @@ def test_train_script_build_data_config_disables_drop_last_in_fast_dev_run() -> 
         split_config_path=None,
         split_name=None,
         seed=None,
+        smpl_model_path=None,
+        mhr_assets_dir=None,
         fast_dev_run=True,
         max_epochs=None,
         default_root_dir="outputs/stage1",
@@ -86,6 +160,8 @@ def test_train_script_build_data_config_overrides_split_selection() -> None:
         split_config_path="configs/data/humman_stage1_splits.yaml",
         split_name="random_split",
         seed=None,
+        smpl_model_path=None,
+        mhr_assets_dir=None,
         fast_dev_run=False,
         max_epochs=None,
         default_root_dir="outputs/stage1",
@@ -113,6 +189,8 @@ def test_train_script_build_trainer_config_overrides_multi_gpu_settings() -> Non
         split_config_path=None,
         split_name=None,
         seed=None,
+        smpl_model_path=None,
+        mhr_assets_dir=None,
         fast_dev_run=False,
         max_epochs=50,
         accelerator="gpu",
@@ -134,3 +212,42 @@ def test_train_script_build_trainer_config_overrides_multi_gpu_settings() -> Non
     assert trainer_config["devices"] == 2
     assert trainer_config["strategy"] == "ddp"
     assert trainer_config["num_nodes"] == 1
+    logger = trainer_config["logger"]
+    checkpoint = trainer_config["callbacks"][0]
+    assert Path(checkpoint.dirpath) == Path(logger.log_dir) / "checkpoints"
+
+
+def test_resolve_test_after_train_ckpt_path_prefers_best_checkpoint() -> None:
+    train_module = _load_train_script_module()
+
+    class DummyCheckpoint:
+        best_model_path = "/tmp/best.ckpt"
+        last_model_path = "/tmp/last.ckpt"
+
+    class DummyTrainer:
+        checkpoint_callback = DummyCheckpoint()
+
+    ckpt_path = train_module.resolve_test_after_train_ckpt_path(
+        DummyTrainer(),
+        requested="best",
+    )
+
+    assert ckpt_path == "/tmp/best.ckpt"
+
+
+def test_resolve_test_after_train_ckpt_path_can_fallback_to_current_model() -> None:
+    train_module = _load_train_script_module()
+
+    class DummyCheckpoint:
+        best_model_path = ""
+        last_model_path = ""
+
+    class DummyTrainer:
+        checkpoint_callback = DummyCheckpoint()
+
+    ckpt_path = train_module.resolve_test_after_train_ckpt_path(
+        DummyTrainer(),
+        requested="best",
+    )
+
+    assert ckpt_path is None
