@@ -51,16 +51,6 @@ def parse_args() -> argparse.Namespace:
         help="Minimum number of valid views required to keep a sample.",
     )
     parser.add_argument(
-        "--target-dir",
-        type=str,
-        default=None,
-        help=(
-            "Optional directory of per-sample target .npz files named "
-            "<sequence_id>_<frame_id>.npz. If omitted, target_path is left unset "
-            "and the dataset falls back to the first view."
-        ),
-    )
-    parser.add_argument(
         "--absolute-paths",
         action="store_true",
         help="Write absolute paths into the manifest instead of paths relative to the manifest file.",
@@ -72,21 +62,17 @@ def main() -> None:
     args = parse_args()
     predictions_dir = Path(args.predictions_dir).resolve()
     output_path = Path(args.output_path).resolve()
-    target_dir = Path(args.target_dir).resolve() if args.target_dir is not None else None
 
     if not predictions_dir.exists():
         raise FileNotFoundError(f"Predictions directory does not exist: {predictions_dir}")
     if args.min_views < 1:
         raise ValueError(f"--min-views must be >= 1, got {args.min_views}")
-    if target_dir is not None and not target_dir.exists():
-        raise FileNotFoundError(f"Target directory does not exist: {target_dir}")
 
     parsed_predictions, skipped_files = collect_predictions(predictions_dir)
     samples = build_manifest_samples(
         parsed_predictions,
         min_views=args.min_views,
         manifest_dir=output_path.parent,
-        target_dir=target_dir,
         use_absolute_paths=args.absolute_paths,
     )
 
@@ -156,7 +142,6 @@ def build_manifest_samples(
     *,
     min_views: int,
     manifest_dir: Path,
-    target_dir: Path | None,
     use_absolute_paths: bool,
 ) -> list[dict[str, Any]]:
     grouped_predictions: dict[tuple[str, str], list[ParsedPrediction]] = defaultdict(list)
@@ -191,33 +176,9 @@ def build_manifest_samples(
         if action_id is not None:
             sample["action_id"] = action_id
 
-        target_path = resolve_target_path(
-            sequence_id=sequence_id,
-            frame_id=frame_id,
-            target_dir=target_dir,
-        )
-        if target_path is not None:
-            sample["target_path"] = stringify_path(
-                target_path,
-                manifest_dir=manifest_dir,
-                use_absolute_paths=use_absolute_paths,
-            )
-
         samples.append(sample)
 
     return samples
-
-
-def resolve_target_path(
-    *, sequence_id: str, frame_id: str, target_dir: Path | None
-) -> Path | None:
-    if target_dir is None:
-        return None
-
-    target_path = target_dir / f"{sequence_id}_{frame_id}.npz"
-    if not target_path.exists():
-        raise FileNotFoundError(f"Expected target file does not exist: {target_path}")
-    return target_path.resolve()
 
 
 def parse_sequence_metadata(sequence_id: str) -> tuple[str | None, str | None]:

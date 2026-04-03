@@ -1,7 +1,7 @@
 name: "stage1_mlp_fusion"
 input_dim: 249
-mhr_dim: 204
-shape_dim: 45
+body_pose_dim: 69
+betas_dim: 10
 hidden_dim: 256
 latent_dim: 256
 encoder_layers: 2

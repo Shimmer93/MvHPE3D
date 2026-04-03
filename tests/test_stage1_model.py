@@ -24,8 +24,8 @@ def test_stage1_model_forward_shapes() -> None:
     model = Stage1MLPFusionModel(Stage1MLPFusionConfig())
     outputs = model.forward(__import__("torch").zeros(2, 3, 249))
 
-    assert tuple(outputs["pred_mhr_params"].shape) == (2, 204)
-    assert tuple(outputs["pred_shape_params"].shape) == (2, 45)
+    assert tuple(outputs["pred_body_pose"].shape) == (2, 69)
+    assert tuple(outputs["pred_betas"].shape) == (2, 10)
     assert tuple(outputs["fused_feature"].shape) == (2, 256)
 
 
@@ -61,6 +61,7 @@ def test_train_script_build_data_config_disables_drop_last_in_fast_dev_run() -> 
     train_module = _load_train_script_module()
     args = Namespace(
         manifest_path=None,
+        gt_smpl_dir=None,
         split_config_path=None,
         split_name=None,
         seed=None,
@@ -81,6 +82,7 @@ def test_train_script_build_data_config_overrides_split_selection() -> None:
     train_module = _load_train_script_module()
     args = Namespace(
         manifest_path=None,
+        gt_smpl_dir="dummy_smpl",
         split_config_path="configs/data/humman_stage1_splits.yaml",
         split_name="random_split",
         seed=None,
@@ -90,10 +92,15 @@ def test_train_script_build_data_config_overrides_split_selection() -> None:
         config="configs/experiment/stage1_cross_camera.yaml",
     )
     data_config = train_module.build_data_config(
-        {"manifest_path": "dummy.json", "split_name": "cross_camera_split"},
+        {
+            "manifest_path": "dummy.json",
+            "split_name": "cross_camera_split",
+            "gt_smpl_dir": None,
+        },
         args,
     )
 
+    assert data_config.gt_smpl_dir == "dummy_smpl"
     assert data_config.split_config_path == "configs/data/humman_stage1_splits.yaml"
     assert data_config.split_name == "random_split"
 
@@ -102,6 +109,7 @@ def test_train_script_build_trainer_config_overrides_multi_gpu_settings() -> Non
     train_module = _load_train_script_module()
     args = Namespace(
         manifest_path=None,
+        gt_smpl_dir=None,
         split_config_path=None,
         split_name=None,
         seed=None,

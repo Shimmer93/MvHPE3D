@@ -55,11 +55,10 @@ reproducible repository state rather than an untracked local script.
 **Input**: `N >= 2` single-view SAM3DBody predictions from different views of the same person.
 
 **Stage 1 model input per view**:
-- `smpl_betas`
-- `smpl_body_pose`
+- `mhr_model_params`
+- `shape_params`
 
 **Available auxiliary per-view fields**:
-- `smpl_global_orient`
 - `pred_cam_t`
 - `cam_int`
 - `image_size`
@@ -80,10 +79,9 @@ reproducible repository state rather than an untracked local script.
    - Extracts LiDAR point cloud from depth
    - Provides GT: 3D keypoints (`skl/`), SMPL params (`smpl/`), camera intrinsics (`cameras/`)
 
-2. `external/sam-3d-body/demo_save_compact_params.py` with `--export_smpl_params`
+2. `external/sam-3d-body/demo_save_compact_params.py`
    - Input: cropped RGB images from `/opt/data/humman_cropped/rgb/`
-   - Output per image used in this project: `smpl_betas`, `smpl_body_pose`, `smpl_global_orient`, `pred_cam_t`, `cam_int`, `image_size`
-   - In Stage 1, `smpl_global_orient + pred_cam_t` are kept for visualization only and are not used as model inputs or supervision targets
+   - Output per image used as Stage 1 input: `mhr_model_params`, `shape_params`, `pred_cam_t`, `cam_int`, `image_size`
    - The training manifest is a split-agnostic sample inventory. Optional fields such as `split`, `subject_id`, and `action_id` are metadata used by split policies, not fixed train/val ownership.
 
 3. Build the Stage 1 manifest from the exported `.npz` predictions:
@@ -96,8 +94,8 @@ uv run python scripts/build_humman_stage1_manifest.py \
 ```
 
 This keeps only valid single-person exports and groups them by
-`sequence_id + frame_id`. If `target_path` is omitted, the current dataset code
-falls back to the first exported view as the training target.
+`sequence_id + frame_id`. Training supervision now always comes from the
+HuMMan GT SMPL sequence files in `smpl/`, not from any exported prediction file.
 
 **Assumption**: Single person per sequence. No cross-view person association is needed.
 
@@ -115,7 +113,9 @@ bash scripts/train_fusion.sh \
 This wrapper calls `scripts/train.py` with the default Stage 1 cross-camera
 experiment config and writes logs/checkpoints under `outputs/stage1/`. You can
 forward extra training flags such as `--max-epochs 50`, `--fast-dev-run`, or a
-custom `--default-root-dir`.
+custom `--default-root-dir`. By default the datamodule looks for GT SMPL under
+`$(dirname manifest)/smpl`; override that with `--gt-smpl-dir /path/to/smpl`
+if your manifest lives elsewhere.
 
 To switch split protocols without regenerating the manifest:
 
@@ -128,6 +128,10 @@ bash scripts/train_fusion.sh \
 The default split policy file is `configs/data/humman_stage1_splits.yaml`. It
 contains named policies such as `cross_camera_split` and `random_split`.
 
+Important:
+- exported SAM3DBody `.npz` files must include `mhr_model_params` and `shape_params`
+- supervision still comes from HuMMan GT SMPL under `smpl/`
+
 For multi-GPU training, forward Lightning trainer overrides from the CLI:
 
 ```bash
@@ -138,6 +142,32 @@ CUDA_VISIBLE_DEVICES=0,1 bash scripts/train_fusion.sh \
   --strategy ddp
 ```
 
+To evaluate a trained checkpoint on the test split:
+
+```bash
+uv run python scripts/test.py \
+  --checkpoint-path /path/to/model.ckpt \
+  --manifest-path /path/to/humman_stage1_manifest.json \
+  --stage test
+```
+
+To save a few prediction-vs-GT comparison visualizations:
+
+```bash
+uv run python scripts/visualize.py \
+  --checkpoint-path /path/to/model.ckpt \
+  --manifest-path /path/to/humman_stage1_manifest.json \
+  --gt-smpl-dir /path/to/humman_cropped/smpl \
+  --stage test \
+  --num-samples 8 \
+  --output-dir outputs/stage1_visualizations
+```
+
+This renders predicted and GT SMPL meshes over the cropped RGB images for each
+selected view and saves per-view overlays plus a contact sheet per sample.
+Because Stage 1 predicts only canonical body pose/betas, both meshes are placed
+into the image with HuMMan GT `global_orient`, `transl`, and camera calibration.
+
 **Sampling protocols**:
 - `cross_camera_split` (main): train on `{kinect_000, 002, 003, 004, 005, 006, 008, iphone}`, val on `{kinect_001, 007, 009}`
 - `random_split` (secondary sanity check): random 80/20 train/val split across all cameras
@@ -145,13 +175,13 @@ CUDA_VISIBLE_DEVICES=0,1 bash scripts/train_fusion.sh \
 **Stage 1 (Current)**: Simple MLP-based baseline
 - Per-view encoder: MLP over concatenated single-view features
 - Fusion: permutation-invariant pooling across views (DeepSets-style)
-- Decoder: MLP that predicts fused canonical body parameters
+- Decoder: MLP that predicts fused canonical SMPL parameters
 - Stage 1 input progression:
-  1. per-view input uses only `smpl_betas + smpl_body_pose`
+  1. per-view input uses `mhr_model_params + shape_params`
   2. fuse across views in canonical space
   3. predict fused `smpl_betas + smpl_body_pose`
 - Supervision: GT SMPL parameters transformed to the pelvis-centered, root rotation-removed canonical space
-- `smpl_global_orient + pred_cam_t` are excluded from Stage 1 model input and used only for qualitative visualization
+- `pred_cam_t` and `cam_int` are excluded from Stage 1 model input and kept only as auxiliary fields
 
 **Stage 2 (Future)**:
 - Add explicit per-view relative camera prediction for reprojection and image-space visualization
@@ -165,12 +195,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash scripts/train_fusion.sh \
 
 ## Visualization
 
-- Side-by-side GT vs prediction in canonical space with arbitrary rotation
-- Stage 1 image overlay is a visualization trick, not a learned output
-- Rendering procedure for Stage 1 overlays:
-  1. take the fused canonical `smpl_betas + smpl_body_pose`
-  2. attach each view's exported `smpl_global_orient + pred_cam_t`
-  3. render with that view's exported `cam_int`
-- This means Stage 1 overlays reuse single-view camera/root predictions from SAM3DBody to place the fused body back into each image
-- Therefore, image overlays are qualitative sanity checks only and should not be interpreted as evidence that Stage 1 has learned per-view camera geometry
+- `scripts/visualize.py` saves RGB, predicted overlay, GT overlay, and combined overlay for each selected camera view
+- Overlay placement uses HuMMan GT `global_orient`, `transl`, and camera extrinsics for both meshes
+- This is a qualitative comparison of fused body shape/pose, not evidence that Stage 1 predicts cameras or root placement
 - Future: replace the above with model-predicted per-view relative cameras

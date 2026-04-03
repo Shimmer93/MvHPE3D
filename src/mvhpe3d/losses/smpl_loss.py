@@ -1,4 +1,4 @@
-"""Losses for Stage 1 MHR parameter fusion."""
+"""Losses for Stage 1 SMPL parameter fusion."""
 
 from __future__ import annotations
 
@@ -13,12 +13,12 @@ import torch.nn.functional as F
 class Stage1LossConfig:
     """Weights for the Stage 1 objective."""
 
-    mhr_weight: float = 1.0
-    shape_weight: float = 1.0
+    body_pose_weight: float = 1.0
+    betas_weight: float = 1.0
 
 
 class Stage1Loss(nn.Module):
-    """Weighted MSE loss over MHR model params and shape params."""
+    """Weighted MSE loss over canonical SMPL body pose and betas."""
 
     def __init__(self, config: Stage1LossConfig) -> None:
         super().__init__()
@@ -27,19 +27,19 @@ class Stage1Loss(nn.Module):
     def forward(
         self,
         *,
-        pred_mhr_params: torch.Tensor,
-        pred_shape_params: torch.Tensor,
-        target_mhr_params: torch.Tensor,
-        target_shape_params: torch.Tensor,
+        pred_body_pose: torch.Tensor,
+        pred_betas: torch.Tensor,
+        target_body_pose: torch.Tensor,
+        target_betas: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        mhr_loss = F.mse_loss(pred_mhr_params, target_mhr_params)
-        shape_loss = F.mse_loss(pred_shape_params, target_shape_params)
+        body_pose_loss = F.mse_loss(pred_body_pose, target_body_pose)
+        betas_loss = F.mse_loss(pred_betas, target_betas)
         total_loss = (
-            self.config.mhr_weight * mhr_loss
-            + self.config.shape_weight * shape_loss
+            self.config.body_pose_weight * body_pose_loss
+            + self.config.betas_weight * betas_loss
         )
         return {
             "loss": total_loss,
-            "loss_mhr_params": mhr_loss,
-            "loss_shape_params": shape_loss,
+            "loss_body_pose": body_pose_loss,
+            "loss_betas": betas_loss,
         }

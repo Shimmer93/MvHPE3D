@@ -18,10 +18,12 @@ class HuMManStage1Dataset(Dataset[dict[str, Any]]):
     """Dataset for Stage 1 canonical body fusion.
 
     Each returned sample follows the schema:
-    - ``views_input``: tensor of shape ``[N, D]`` from per-view mhr_model_params + shape_params
-    - ``target_mhr_params``: canonical target MHR model parameters
-    - ``target_shape_params``: canonical target shape parameters
-    - ``view_aux``: per-view visualization fields
+    - ``views_input``: tensor of shape ``[N, D]`` from per-view
+      ``mhr_model_params + shape_params``
+    - ``target_body_pose``: canonical target SMPL body pose
+    - ``target_betas``: canonical target SMPL shape coefficients
+    - ``view_aux``: per-view auxiliary visualization fields
+    - ``target_aux``: GT root orientation / translation for later rendering
     - ``meta``: identifiers and camera names kept as Python data
     """
 
@@ -31,6 +33,7 @@ class HuMManStage1Dataset(Dataset[dict[str, Any]]):
         *,
         num_views: int,
         train: bool,
+        gt_smpl_dir: str | Path,
         seed: int = 0,
     ) -> None:
         if num_views < 1:
@@ -38,7 +41,9 @@ class HuMManStage1Dataset(Dataset[dict[str, Any]]):
         self.records = records
         self.num_views = num_views
         self.train = train
+        self.gt_smpl_dir = Path(gt_smpl_dir).resolve()
         self.seed = seed
+        self._gt_sequence_cache: dict[str, dict[str, np.ndarray]] = {}
 
     def __len__(self) -> int:
         return len(self.records)
@@ -67,21 +72,27 @@ class HuMManStage1Dataset(Dataset[dict[str, Any]]):
             )
             camera_ids.append(view.camera_id)
 
-        target_payload = self._load_target_payload(record)
+        target_payload = self._load_gt_target(record)
         canonical_target = canonicalize_stage1_target(
-            mhr_model_params=self._require_field(target_payload, "mhr_model_params"),
-            shape_params=self._require_field(
-                target_payload, "shape_params", expected_last_dim=45
-            ),
+            smpl_body_pose=self._require_field(target_payload, "body_pose", expected_last_dim=69),
+            smpl_betas=self._require_field(target_payload, "betas", expected_last_dim=10),
         )
 
         return {
             "views_input": torch.from_numpy(np.stack(view_inputs, axis=0)),
-            "target_mhr_params": torch.from_numpy(canonical_target["target_mhr_params"]),
-            "target_shape_params": torch.from_numpy(canonical_target["target_shape_params"]),
+            "target_body_pose": torch.from_numpy(canonical_target["target_body_pose"]),
+            "target_betas": torch.from_numpy(canonical_target["target_betas"]),
             "view_aux": {
                 key: torch.from_numpy(np.stack(values, axis=0))
                 for key, values in view_aux.items()
+            },
+            "target_aux": {
+                "global_orient": torch.from_numpy(
+                    self._require_field(target_payload, "global_orient", expected_last_dim=3)
+                ),
+                "transl": torch.from_numpy(
+                    self._require_field(target_payload, "transl", expected_last_dim=3)
+                ),
             },
             "meta": {
                 "sample_id": record.sample_id,
@@ -105,11 +116,32 @@ class HuMManStage1Dataset(Dataset[dict[str, Any]]):
         rng = random.Random(self.seed + index)
         return rng.sample(list(ordered_views), k=self.num_views)
 
-    def _load_target_payload(self, record: SampleRecord) -> dict[str, np.ndarray]:
-        if record.target_path is None:
-            first_view = sorted(record.views, key=lambda item: item.camera_id)[0]
-            return self._load_npz(first_view.npz_path)
-        return self._load_npz(record.target_path)
+    def _load_gt_target(self, record: SampleRecord) -> dict[str, np.ndarray]:
+        sequence_payload = self._load_gt_sequence(record.sequence_id)
+        frame_index = self._frame_id_to_index(record.frame_id)
+
+        target_payload: dict[str, np.ndarray] = {}
+        for key in ("global_orient", "body_pose", "betas", "transl"):
+            if key not in sequence_payload:
+                raise KeyError(
+                    f"Missing required GT SMPL field '{key}' for sequence '{record.sequence_id}'"
+                )
+            target_payload[key] = self._select_frame(sequence_payload[key], frame_index, key=key)
+        return target_payload
+
+    def _load_gt_sequence(self, sequence_id: str) -> dict[str, np.ndarray]:
+        cached = self._gt_sequence_cache.get(sequence_id)
+        if cached is not None:
+            return cached
+
+        sequence_path = self.gt_smpl_dir / f"{sequence_id}_smpl_params.npz"
+        if not sequence_path.exists():
+            raise FileNotFoundError(
+                f"GT SMPL sequence file does not exist: {sequence_path}"
+            )
+        cached = self._load_npz(sequence_path)
+        self._gt_sequence_cache[sequence_id] = cached
+        return cached
 
     @staticmethod
     def _load_npz(npz_path: Path) -> dict[str, np.ndarray]:
@@ -137,7 +169,7 @@ class HuMManStage1Dataset(Dataset[dict[str, Any]]):
             raise ValueError(
                 f"Field '{key}' has shape {value.shape}, expected trailing dim "
                 f"{expected_last_dim}"
-            )
+        )
         return np.ascontiguousarray(value)
 
     @staticmethod
@@ -152,6 +184,29 @@ class HuMManStage1Dataset(Dataset[dict[str, Any]]):
         return np.ascontiguousarray(value)
 
     def _build_stage1_input(self, payload: dict[str, np.ndarray]) -> np.ndarray:
-        mhr_params = self._require_field(payload, "mhr_model_params")
+        mhr_params = self._require_field(payload, "mhr_model_params", expected_last_dim=204)
         shape_params = self._require_field(payload, "shape_params", expected_last_dim=45)
         return np.concatenate([mhr_params, shape_params], axis=-1).astype(np.float32, copy=False)
+
+    @staticmethod
+    def _frame_id_to_index(frame_id: str) -> int:
+        frame_number = int(frame_id)
+        if frame_number < 1:
+            raise ValueError(f"Expected 1-based positive frame_id, got '{frame_id}'")
+        return frame_number - 1
+
+    @staticmethod
+    def _select_frame(array: np.ndarray, frame_index: int, *, key: str) -> np.ndarray:
+        value = np.asarray(array, dtype=np.float32)
+        if value.ndim == 1:
+            return np.ascontiguousarray(value)
+        if value.ndim != 2:
+            raise ValueError(
+                f"GT field '{key}' must have shape [T, D] or [D], got {value.shape}"
+            )
+        if not 0 <= frame_index < value.shape[0]:
+            raise IndexError(
+                f"Frame index {frame_index} is out of range for GT field '{key}' "
+                f"with length {value.shape[0]}"
+            )
+        return np.ascontiguousarray(value[frame_index])

@@ -22,16 +22,23 @@ def test_load_sample_records_and_filter_by_split(sample_manifest: Path) -> None:
 
 def test_humman_stage1_dataset_returns_expected_schema(sample_manifest: Path) -> None:
     records = filter_records_by_split(load_sample_records(sample_manifest), "train")
-    dataset = HuMManStage1Dataset(records, num_views=2, train=False)
+    dataset = HuMManStage1Dataset(
+        records,
+        num_views=2,
+        train=False,
+        gt_smpl_dir=sample_manifest.parent / "smpl",
+    )
 
     sample = dataset[0]
 
     assert tuple(sample["views_input"].shape) == (2, 249)
-    assert tuple(sample["target_mhr_params"].shape) == (204,)
-    assert tuple(sample["target_shape_params"].shape) == (45,)
+    assert tuple(sample["target_body_pose"].shape) == (69,)
+    assert tuple(sample["target_betas"].shape) == (10,)
     assert tuple(sample["view_aux"]["pred_cam_t"].shape) == (2, 3)
     assert tuple(sample["view_aux"]["cam_int"].shape) == (2, 3, 3)
     assert tuple(sample["view_aux"]["image_size"].shape) == (2, 2)
+    assert tuple(sample["target_aux"]["global_orient"].shape) == (3,)
+    assert tuple(sample["target_aux"]["transl"].shape) == (3,)
     assert sample["meta"]["sample_id"] == "sample_train"
     assert len(sample["meta"]["camera_ids"]) == 2
 

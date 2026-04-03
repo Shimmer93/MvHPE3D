@@ -18,6 +18,7 @@ class Stage1DataConfig:
     """Configuration for the Stage 1 HuMMan LightningDataModule."""
 
     manifest_path: str
+    gt_smpl_dir: str | None = None
     split_config_path: str | None = None
     split_name: str | None = None
     num_views: int = 2
@@ -46,6 +47,9 @@ class Stage1HuMManDataModule(L.LightningDataModule):
         manifest_path = Path(self.config.manifest_path)
         if not manifest_path.exists():
             raise FileNotFoundError(f"Manifest does not exist: {manifest_path}")
+        gt_smpl_dir = self._resolve_gt_smpl_dir()
+        if not gt_smpl_dir.exists():
+            raise FileNotFoundError(f"GT SMPL directory does not exist: {gt_smpl_dir}")
         if self.config.split_config_path is not None:
             split_config_path = Path(self.config.split_config_path)
             if not split_config_path.exists():
@@ -54,18 +58,21 @@ class Stage1HuMManDataModule(L.LightningDataModule):
     def setup(self, stage: str | None = None) -> None:
         records = load_sample_records(self.config.manifest_path)
         selected_records = self._resolve_dataset_records(records)
+        gt_smpl_dir = self._resolve_gt_smpl_dir()
 
         if stage in (None, "fit"):
             self.train_dataset = HuMManStage1Dataset(
                 selected_records["train"],
                 num_views=self.config.num_views,
                 train=True,
+                gt_smpl_dir=gt_smpl_dir,
                 seed=self.config.seed,
             )
             self.val_dataset = HuMManStage1Dataset(
                 selected_records["val"],
                 num_views=self.config.num_views,
                 train=False,
+                gt_smpl_dir=gt_smpl_dir,
                 seed=self.config.seed,
             )
 
@@ -74,6 +81,7 @@ class Stage1HuMManDataModule(L.LightningDataModule):
                 selected_records["val"],
                 num_views=self.config.num_views,
                 train=False,
+                gt_smpl_dir=gt_smpl_dir,
                 seed=self.config.seed,
             )
 
@@ -82,6 +90,7 @@ class Stage1HuMManDataModule(L.LightningDataModule):
                 selected_records["test"],
                 num_views=self.config.num_views,
                 train=False,
+                gt_smpl_dir=gt_smpl_dir,
                 seed=self.config.seed,
             )
 
@@ -140,3 +149,10 @@ class Stage1HuMManDataModule(L.LightningDataModule):
             "val": filter_records_by_split(records, self.config.val_split),
             "test": filter_records_by_split(records, self.config.test_split),
         }
+
+    def _resolve_gt_smpl_dir(self) -> Path:
+        if self.config.gt_smpl_dir is not None:
+            return Path(self.config.gt_smpl_dir).resolve()
+
+        manifest_path = Path(self.config.manifest_path).resolve()
+        return (manifest_path.parent / "smpl").resolve()

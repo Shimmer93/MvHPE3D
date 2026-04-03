@@ -55,7 +55,6 @@ def test_manifest_builder_groups_valid_views_and_skips_invalid_exports(tmp_path:
         parsed_predictions,
         min_views=2,
         manifest_dir=tmp_path,
-        target_dir=None,
         use_absolute_paths=False,
     )
 

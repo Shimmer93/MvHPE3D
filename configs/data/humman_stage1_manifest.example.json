@@ -7,7 +7,6 @@
       "split": "training",
       "subject_id": "subject01",
       "action_id": "action01",
-      "target_path": "/path/to/canonical_target_or_reference_view.npz",
       "views": [
         {
           "camera_id": "kinect_000",

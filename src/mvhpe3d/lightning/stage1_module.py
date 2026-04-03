@@ -30,9 +30,18 @@ class Stage1FusionLightningModule(L.LightningModule):
         optimization_config: Stage1OptimizationConfig | None = None,
     ) -> None:
         super().__init__()
-        self.model_config = model_config or Stage1MLPFusionConfig()
-        self.loss_config = loss_config or Stage1LossConfig()
-        self.optimization_config = optimization_config or Stage1OptimizationConfig()
+        self.model_config = _coerce_dataclass_config(
+            model_config,
+            Stage1MLPFusionConfig,
+        )
+        self.loss_config = _coerce_dataclass_config(
+            loss_config,
+            Stage1LossConfig,
+        )
+        self.optimization_config = _coerce_dataclass_config(
+            optimization_config,
+            Stage1OptimizationConfig,
+        )
 
         self.model = Stage1MLPFusionModel(self.model_config)
         self.criterion = Stage1Loss(self.loss_config)
@@ -84,8 +93,8 @@ class Stage1FusionLightningModule(L.LightningModule):
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         predictions = self(batch["views_input"])
         return {
-            "pred_mhr_params": predictions["pred_mhr_params"],
-            "pred_shape_params": predictions["pred_shape_params"],
+            "pred_body_pose": predictions["pred_body_pose"],
+            "pred_betas": predictions["pred_betas"],
             "meta": batch["meta"],
         }
 
@@ -99,15 +108,15 @@ class Stage1FusionLightningModule(L.LightningModule):
     def _shared_step(self, batch, *, stage: str) -> dict[str, torch.Tensor]:
         predictions = self(batch["views_input"])
         losses = self.criterion(
-            pred_mhr_params=predictions["pred_mhr_params"],
-            pred_shape_params=predictions["pred_shape_params"],
-            target_mhr_params=batch["target_mhr_params"],
-            target_shape_params=batch["target_shape_params"],
+            pred_body_pose=predictions["pred_body_pose"],
+            pred_betas=predictions["pred_betas"],
+            target_body_pose=batch["target_body_pose"],
+            target_betas=batch["target_betas"],
         )
         return {
             f"{stage}/loss": losses["loss"],
-            f"{stage}/loss_mhr_params": losses["loss_mhr_params"],
-            f"{stage}/loss_shape_params": losses["loss_shape_params"],
+            f"{stage}/loss_body_pose": losses["loss_body_pose"],
+            f"{stage}/loss_betas": losses["loss_betas"],
         }
 
     def _log_metrics_if_possible(
@@ -128,3 +137,13 @@ class Stage1FusionLightningModule(L.LightningModule):
             prog_bar=prog_bar,
             batch_size=batch_size,
         )
+
+
+def _coerce_dataclass_config(value, config_type):
+    if value is None:
+        return config_type()
+    if isinstance(value, config_type):
+        return value
+    if isinstance(value, dict):
+        return config_type(**value)
+    raise TypeError(f"Expected {config_type.__name__}, dict, or None; got {type(value)!r}")

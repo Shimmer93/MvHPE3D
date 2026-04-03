@@ -1,14 +1,14 @@
-"""Canonicalization helpers for Stage 1 targets.
+"""Canonicalization helpers for Stage 1 GT SMPL targets.
 
-Stage 1 predicts ``mhr_model_params`` (204-dim) and ``shape_params`` (45-dim).
-The target space is pelvis-centered with the root rotation removed.
+Stage 1 predicts the canonical SMPL body:
+- ``smpl_body_pose`` (23 joints, axis-angle, 69-dim)
+- ``smpl_betas`` (10-dim)
 
-At this stage of the repository the implementation is intentionally narrow:
-- ``mhr_model_params`` is passed through unchanged
-- ``shape_params`` is passed through unchanged
-
-Once the exact HuMMan-to-canonical transform is finalized, this module should be
-the single place where that logic is made explicit and tested.
+The target space is pelvis-centered with the SMPL root rotation removed.
+For the current Stage 1 baseline, this means:
+- drop ``smpl_global_orient``
+- drop ``smpl_transl``
+- supervise only ``smpl_body_pose`` and ``smpl_betas``
 """
 
 from __future__ import annotations
@@ -31,22 +31,22 @@ def _to_float32_array(value: Any, *, expected_last_dim: int | None = None) -> np
 
 def canonicalize_stage1_target(
     *,
-    mhr_model_params: Any,
-    shape_params: Any,
+    smpl_body_pose: Any,
+    smpl_betas: Any,
 ) -> dict[str, np.ndarray]:
     """Build the canonical Stage 1 target representation.
 
     Args:
-        mhr_model_params: MHR model parameters (204-dim).
-        shape_params: MHR shape parameters (45-dim).
+        smpl_body_pose: SMPL body pose without the root joint (69-dim).
+        smpl_betas: SMPL shape coefficients (10-dim).
 
     Returns:
         Dictionary with canonical target tensors.
     """
-    canonical_mhr_params = _to_float32_array(mhr_model_params, expected_last_dim=204)
-    canonical_shape_params = _to_float32_array(shape_params, expected_last_dim=45)
+    canonical_body_pose = _to_float32_array(smpl_body_pose, expected_last_dim=69)
+    canonical_betas = _to_float32_array(smpl_betas, expected_last_dim=10)
 
     return {
-        "target_mhr_params": canonical_mhr_params,
-        "target_shape_params": canonical_shape_params,
+        "target_body_pose": canonical_body_pose,
+        "target_betas": canonical_betas,
     }

@@ -19,6 +19,7 @@ Required:
 Optional:
   --config PATH           Experiment config to use.
                           Default: configs/experiment/stage1_cross_camera.yaml
+  --gt-smpl-dir PATH      Optional HuMMan GT SMPL directory override.
   --split-config-path PATH
                           Optional split policy YAML override.
   --split-name NAME       Optional named split policy override.
@@ -33,6 +34,10 @@ Optional:
 Examples:
   bash scripts/train_fusion.sh \
     --manifest-path /opt/data/humman_cropped/humman_stage1_manifest.json
+
+  bash scripts/train_fusion.sh \
+    --manifest-path /opt/data/humman_cropped/humman_stage1_manifest.json \
+    --gt-smpl-dir /opt/data/humman_cropped/smpl
 
   CUDA_VISIBLE_DEVICES=0 bash scripts/train_fusion.sh \
     --manifest-path /opt/data/humman_cropped/humman_stage1_manifest.json \
@@ -51,6 +56,7 @@ MANIFEST_PATH=""
 CONFIG_PATH="${DEFAULT_CONFIG}"
 SPLIT_CONFIG_PATH=""
 SPLIT_NAME=""
+GT_SMPL_DIR=""
 OUTPUT_ROOT="${DEFAULT_OUTPUT_ROOT}"
 PASSTHROUGH_ARGS=()
 
@@ -78,6 +84,14 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             SPLIT_CONFIG_PATH="$2"
+            shift 2
+            ;;
+        --gt-smpl-dir)
+            if [[ $# -lt 2 ]]; then
+                echo "error: --gt-smpl-dir requires a value" >&2
+                exit 1
+            fi
+            GT_SMPL_DIR="$2"
             shift 2
             ;;
         --split-name)
@@ -140,6 +154,10 @@ CMD=(
 
 if [[ -n "${SPLIT_CONFIG_PATH}" ]]; then
     CMD+=(--split-config-path "${SPLIT_CONFIG_PATH}")
+fi
+
+if [[ -n "${GT_SMPL_DIR}" ]]; then
+    CMD+=(--gt-smpl-dir "${GT_SMPL_DIR}")
 fi
 
 if [[ -n "${SPLIT_NAME}" ]]; then

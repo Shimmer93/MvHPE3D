@@ -21,7 +21,7 @@ class ViewRecord:
 
 @dataclass(frozen=True)
 class SampleRecord:
-    """One training example consisting of multiple views and one canonical target."""
+    """One training example consisting of multiple views plus metadata."""
 
     sample_id: str
     sequence_id: str
@@ -71,7 +71,7 @@ def load_sample_records(manifest_path: str | Path) -> list[SampleRecord]:
     - ``sample_id``
     - ``sequence_id``
     - ``frame_id``
-    - ``target_path`` (optional)
+    - ``target_path`` (optional legacy field; Stage 1 GT now comes from HuMMan SMPL files)
     - ``split`` (optional source split tag, e.g. ``training``)
     - ``subject_id`` (optional)
     - ``action_id`` (optional)

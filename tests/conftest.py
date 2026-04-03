@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 
 def _write_prediction_npz(path: Path) -> None:
@@ -18,10 +25,12 @@ def _write_prediction_npz(path: Path) -> None:
     np.savez(path, **payload)
 
 
-def _write_target_npz(path: Path) -> None:
+def _write_gt_smpl_sequence(path: Path, *, num_frames: int) -> None:
     payload = {
-        "mhr_model_params": np.zeros(204, dtype=np.float32),
-        "shape_params": np.zeros(45, dtype=np.float32),
+        "global_orient": np.zeros((num_frames, 3), dtype=np.float32),
+        "body_pose": np.zeros((num_frames, 69), dtype=np.float32),
+        "betas": np.zeros((num_frames, 10), dtype=np.float32),
+        "transl": np.zeros((num_frames, 3), dtype=np.float32),
     }
     np.savez(path, **payload)
 
@@ -29,11 +38,12 @@ def _write_target_npz(path: Path) -> None:
 @pytest.fixture()
 def sample_manifest(tmp_path: Path) -> Path:
     cameras = ["kinect_000", "kinect_001", "kinect_002"]
+    gt_smpl_dir = tmp_path / "smpl"
+    gt_smpl_dir.mkdir()
     for camera_id in cameras:
         _write_prediction_npz(tmp_path / f"{camera_id}.npz")
 
-    target_path = tmp_path / "target.npz"
-    _write_target_npz(target_path)
+    _write_gt_smpl_sequence(gt_smpl_dir / "seq_001_smpl_params.npz", num_frames=3)
 
     samples = []
     for split, frame_id in [("train", "000001"), ("val", "000002"), ("test", "000003")]:
@@ -43,7 +53,6 @@ def sample_manifest(tmp_path: Path) -> Path:
                 "sequence_id": "seq_001",
                 "frame_id": frame_id,
                 "split": split,
-                "target_path": str(target_path),
                 "views": [
                     {
                         "camera_id": camera_id,
@@ -62,11 +71,10 @@ def sample_manifest(tmp_path: Path) -> Path:
 @pytest.fixture()
 def sample_inventory_manifest(tmp_path: Path) -> Path:
     cameras = ["kinect_000", "kinect_001", "kinect_002", "kinect_003"]
+    gt_smpl_dir = tmp_path / "smpl"
+    gt_smpl_dir.mkdir(exist_ok=True)
     for camera_id in cameras:
         _write_prediction_npz(tmp_path / f"{camera_id}.npz")
-
-    target_path = tmp_path / "target.npz"
-    _write_target_npz(target_path)
 
     samples = []
     sample_specs = [
@@ -76,15 +84,19 @@ def sample_inventory_manifest(tmp_path: Path) -> Path:
         ("sample_3", "subject_b", "action_jump", "validation", "000004"),
     ]
     for sample_id, subject_id, action_id, split, frame_id in sample_specs:
+        sequence_id = f"{subject_id}_{action_id}"
+        _write_gt_smpl_sequence(
+            gt_smpl_dir / f"{sequence_id}_smpl_params.npz",
+            num_frames=4,
+        )
         samples.append(
             {
                 "sample_id": sample_id,
-                "sequence_id": f"{subject_id}_{action_id}",
+                "sequence_id": sequence_id,
                 "frame_id": frame_id,
                 "split": split,
                 "subject_id": subject_id,
                 "action_id": action_id,
-                "target_path": str(target_path),
                 "views": [
                     {
                         "camera_id": camera_id,

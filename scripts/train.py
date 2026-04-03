@@ -39,6 +39,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional override for the data manifest path",
     )
     parser.add_argument(
+        "--gt-smpl-dir",
+        type=str,
+        default=None,
+        help="Optional override for the HuMMan GT SMPL directory",
+    )
+    parser.add_argument(
         "--split-config-path",
         type=str,
         default=None,
@@ -130,6 +136,8 @@ def build_data_config(config: dict[str, Any], args: argparse.Namespace) -> Stage
 
     if args.manifest_path is not None:
         data_kwargs["manifest_path"] = args.manifest_path
+    if args.gt_smpl_dir is not None:
+        data_kwargs["gt_smpl_dir"] = args.gt_smpl_dir
     if args.split_config_path is not None:
         data_kwargs["split_config_path"] = args.split_config_path
     if args.split_name is not None:
