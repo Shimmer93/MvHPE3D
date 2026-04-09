@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
 import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint
-from lightning.pytorch.loggers import CSVLogger
+from lightning.pytorch.loggers import CSVLogger, Logger, WandbLogger
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
@@ -21,7 +22,7 @@ from mvhpe3d.data import Stage1DataConfig, Stage1HuMManDataModule
 from mvhpe3d.lightning import Stage1FusionLightningModule, Stage1OptimizationConfig
 from mvhpe3d.losses import Stage1LossConfig
 from mvhpe3d.models import Stage1MLPFusionConfig
-from mvhpe3d.utils import load_experiment_config
+from mvhpe3d.utils import load_experiment_config, validate_mhr_asset_folder
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,6 +44,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Optional override for the HuMMan GT SMPL directory",
+    )
+    parser.add_argument(
+        "--cameras-dir",
+        type=str,
+        default=None,
+        help="Optional override for the HuMMan camera JSON directory",
     )
     parser.add_argument(
         "--split-config-path",
@@ -111,6 +118,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional override for the MHR asset directory used for test-time input conversion",
     )
     parser.add_argument(
+        "--input-smpl-cache-dir",
+        type=str,
+        default=None,
+        help="Optional directory for caching fitted SMPL parameters converted from input views",
+    )
+    parser.add_argument(
         "--test-after-train",
         action="store_true",
         help="Run a test pass immediately after training finishes",
@@ -133,6 +146,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     experiment = load_experiment_config(args.config)
+    validate_required_mhr_assets(args)
 
     data_config = build_data_config(experiment["data"], args)
     model_config = build_model_config(experiment["model"])
@@ -148,6 +162,7 @@ def main() -> None:
         optimization_config=optimization_config,
         smpl_model_path=args.smpl_model_path,
         mhr_assets_dir=args.mhr_assets_dir,
+        input_smpl_cache_dir=resolve_input_smpl_cache_dir(args, data_config),
     )
 
     trainer_config = build_trainer_config(experiment["trainer"], args, experiment["experiment_name"])
@@ -170,6 +185,8 @@ def build_data_config(config: dict[str, Any], args: argparse.Namespace) -> Stage
         data_kwargs["manifest_path"] = args.manifest_path
     if args.gt_smpl_dir is not None:
         data_kwargs["gt_smpl_dir"] = args.gt_smpl_dir
+    if args.cameras_dir is not None:
+        data_kwargs["cameras_dir"] = args.cameras_dir
     if args.split_config_path is not None:
         data_kwargs["split_config_path"] = args.split_config_path
     if args.split_name is not None:
@@ -211,10 +228,11 @@ def build_trainer_config(
         trainer_kwargs["fast_dev_run"] = True
 
     root_dir = Path(args.default_root_dir).resolve()
-    logger = CSVLogger(save_dir=str(root_dir), name=experiment_name)
+    logger = build_loggers(root_dir=root_dir, experiment_name=experiment_name)
+    csv_logger = logger[0] if isinstance(logger, list) else logger
     checkpoint = ModelCheckpoint(
-        dirpath=str(Path(logger.log_dir) / "checkpoints"),
-        filename="epoch{epoch:03d}-step{step:06d}",
+        dirpath=str(Path(csv_logger.log_dir) / "checkpoints"),
+        filename="{epoch:03d}-{step:06d}",
         monitor="val/loss",
         mode="min",
         save_top_k=1,
@@ -224,7 +242,42 @@ def build_trainer_config(
     trainer_kwargs["default_root_dir"] = str(root_dir)
     trainer_kwargs["logger"] = logger
     trainer_kwargs["callbacks"] = [checkpoint]
+    trainer_kwargs["inference_mode"] = False
     return trainer_kwargs
+
+
+def build_loggers(root_dir: Path, experiment_name: str) -> Logger | list[Logger]:
+    csv_logger = CSVLogger(save_dir=str(root_dir), name=experiment_name)
+    wandb_logger = build_optional_wandb_logger(root_dir=root_dir, experiment_name=experiment_name)
+    if wandb_logger is None:
+        return csv_logger
+    return [csv_logger, wandb_logger]
+
+
+def build_optional_wandb_logger(root_dir: Path, experiment_name: str) -> WandbLogger | None:
+    try:
+        import wandb
+    except Exception:
+        return None
+
+    settings = wandb.Settings(start_method="thread", init_timeout=60)
+    project = os.environ.get("WANDB_PROJECT", "MvHPE3D")
+    mode = os.environ.get("WANDB_MODE")
+    if mode is None and os.environ.get("WANDB_API_KEY") is None:
+        mode = "offline"
+
+    try:
+        return WandbLogger(
+            save_dir=str(root_dir),
+            project=project,
+            name=experiment_name,
+            settings=settings,
+            mode=mode,
+            log_model=False,
+        )
+    except Exception as exc:
+        print(f"W&B logging disabled: {exc}")
+        return None
 
 
 def _parse_devices_arg(value: str) -> int | str | list[int]:
@@ -259,6 +312,12 @@ def maybe_run_test_after_train(
     trainer.test(model=None, datamodule=datamodule, ckpt_path=ckpt_path)
 
 
+def validate_required_mhr_assets(args: argparse.Namespace) -> None:
+    if not args.test_after_train:
+        return
+    validate_mhr_asset_folder(args.mhr_assets_dir or "/opt/data/assets")
+
+
 def resolve_test_after_train_ckpt_path(
     trainer: L.Trainer,
     *,
@@ -280,6 +339,16 @@ def resolve_test_after_train_ckpt_path(
         last_model_path = getattr(checkpoint_callback, "last_model_path", "")
         return last_model_path or None
     return None
+
+
+def resolve_input_smpl_cache_dir(
+    args: argparse.Namespace,
+    data_config: Stage1DataConfig,
+) -> str:
+    if args.input_smpl_cache_dir is not None:
+        return str(Path(args.input_smpl_cache_dir).resolve())
+    manifest_parent = Path(data_config.manifest_path).resolve().parent
+    return str((manifest_parent / "sam3dbody_fitted_smpl").resolve())
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ class Stage1DataConfig:
 
     manifest_path: str
     gt_smpl_dir: str | None = None
+    cameras_dir: str | None = None
     split_config_path: str | None = None
     split_name: str | None = None
     num_views: int = 2
@@ -50,6 +51,9 @@ class Stage1HuMManDataModule(L.LightningDataModule):
         gt_smpl_dir = self._resolve_gt_smpl_dir()
         if not gt_smpl_dir.exists():
             raise FileNotFoundError(f"GT SMPL directory does not exist: {gt_smpl_dir}")
+        cameras_dir = self._resolve_cameras_dir()
+        if not cameras_dir.exists():
+            raise FileNotFoundError(f"Cameras directory does not exist: {cameras_dir}")
         if self.config.split_config_path is not None:
             split_config_path = Path(self.config.split_config_path)
             if not split_config_path.exists():
@@ -59,6 +63,7 @@ class Stage1HuMManDataModule(L.LightningDataModule):
         records = load_sample_records(self.config.manifest_path)
         selected_records = self._resolve_dataset_records(records)
         gt_smpl_dir = self._resolve_gt_smpl_dir()
+        cameras_dir = self._resolve_cameras_dir()
 
         if stage in (None, "fit"):
             self.train_dataset = HuMManStage1Dataset(
@@ -66,6 +71,7 @@ class Stage1HuMManDataModule(L.LightningDataModule):
                 num_views=self.config.num_views,
                 train=True,
                 gt_smpl_dir=gt_smpl_dir,
+                cameras_dir=cameras_dir,
                 seed=self.config.seed,
             )
             self.val_dataset = HuMManStage1Dataset(
@@ -73,6 +79,7 @@ class Stage1HuMManDataModule(L.LightningDataModule):
                 num_views=self.config.num_views,
                 train=False,
                 gt_smpl_dir=gt_smpl_dir,
+                cameras_dir=cameras_dir,
                 seed=self.config.seed,
             )
 
@@ -82,6 +89,7 @@ class Stage1HuMManDataModule(L.LightningDataModule):
                 num_views=self.config.num_views,
                 train=False,
                 gt_smpl_dir=gt_smpl_dir,
+                cameras_dir=cameras_dir,
                 seed=self.config.seed,
             )
 
@@ -91,6 +99,7 @@ class Stage1HuMManDataModule(L.LightningDataModule):
                 num_views=self.config.num_views,
                 train=False,
                 gt_smpl_dir=gt_smpl_dir,
+                cameras_dir=cameras_dir,
                 seed=self.config.seed,
             )
 
@@ -156,3 +165,10 @@ class Stage1HuMManDataModule(L.LightningDataModule):
 
         manifest_path = Path(self.config.manifest_path).resolve()
         return (manifest_path.parent / "smpl").resolve()
+
+    def _resolve_cameras_dir(self) -> Path:
+        if self.config.cameras_dir is not None:
+            return Path(self.config.cameras_dir).resolve()
+
+        manifest_path = Path(self.config.manifest_path).resolve()
+        return (manifest_path.parent / "cameras").resolve()

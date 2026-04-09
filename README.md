@@ -111,11 +111,15 @@ bash scripts/train_fusion.sh \
 ```
 
 This wrapper calls `scripts/train.py` with the default Stage 1 cross-camera
-experiment config and writes logs/checkpoints under `outputs/stage1/`. You can
-forward extra training flags such as `--max-epochs 50`, `--fast-dev-run`, or a
-custom `--default-root-dir`. By default the datamodule looks for GT SMPL under
-`$(dirname manifest)/smpl`; override that with `--gt-smpl-dir /path/to/smpl`
-if your manifest lives elsewhere.
+experiment config and writes each run under
+`outputs/stage1/<experiment_name>/version_x/`, including `metrics.csv`,
+optional W&B metadata, and `checkpoints/`. If `wandb` is importable, training
+also enables a W&B logger automatically; set `WANDB_PROJECT` to override the
+default project name `MvHPE3D`, and set `WANDB_MODE=disabled` to turn it off.
+You can forward extra training flags such as `--max-epochs 50`,
+`--fast-dev-run`, or a custom `--default-root-dir`. By default the datamodule
+looks for GT SMPL under `$(dirname manifest)/smpl`; override that with
+`--gt-smpl-dir /path/to/smpl` if your manifest lives elsewhere.
 
 To run a test pass automatically right after training:
 
@@ -146,6 +150,8 @@ contains named policies such as `cross_camera_split` and `random_split`.
 Important:
 - exported SAM3DBody `.npz` files must include `mhr_model_params` and `shape_params`
 - supervision still comes from HuMMan GT SMPL under `smpl/`
+- validation/test-time camera-frame metrics require the MHR conversion assets
+  (default lookup: `/opt/data/assets`)
 
 For multi-GPU training, forward Lightning trainer overrides from the CLI:
 
@@ -169,16 +175,23 @@ uv run python scripts/test.py \
 
 `scripts/test.py` now reports:
 - loss terms on canonical SMPL parameters
-- MPJPE from the first 24 SMPL joints
+- MPJPE from the first 24 SMPL joints in each selected view's camera frame
 - PA-MPJPE from the same 24 joints after Procrustes alignment
 - `input_avg_mpjpe` from the average of the per-view MHR inputs after MHR-to-SMPL conversion
 - `input_avg_pa_mpjpe` from the same converted per-view inputs after Procrustes alignment
 
-The joints are generated from predicted and GT SMPL bodies in canonical space,
-then pelvis-centered before metric computation.
+During validation and testing, GT SMPL is converted from HuMMan world space to
+each selected camera frame using the HuMMan calibration. The fused prediction is
+then placed into each view using the corresponding input-view MHR-to-SMPL
+camera-frame fit, so MPJPE is no longer computed in pelvis-centered canonical
+space.
 
 If the MHR assets are not under `/opt/data/assets`, pass
 `--mhr-assets-dir /path/to/mhr/assets`.
+
+Converted input-view SMPL fits are cached by default under
+`$(dirname manifest)/sam3dbody_fitted_smpl`. Override that with
+`--input-smpl-cache-dir /path/to/cache` if you want a different location.
 
 To save a few prediction-vs-GT comparison visualizations:
 
@@ -193,9 +206,10 @@ uv run python scripts/visualize.py \
 ```
 
 This renders predicted and GT SMPL meshes over the cropped RGB images for each
-selected view and saves per-view overlays plus a contact sheet per sample.
-Because Stage 1 predicts only canonical body pose/betas, both meshes are placed
-into the image with HuMMan GT `global_orient`, `transl`, and camera calibration.
+selected view and saves per-view overlays plus a contact sheet per sample. The
+GT mesh uses HuMMan camera-frame SMPL, while the fused prediction uses the
+corresponding input view's SAM3DBody-predicted camera-frame placement and is
+projected with the saved per-view `cam_int`.
 
 **Sampling protocols**:
 - `cross_camera_split` (main): train on `{kinect_000, 002, 003, 004, 005, 006, 008, iphone}`, val on `{kinect_001, 007, 009}`

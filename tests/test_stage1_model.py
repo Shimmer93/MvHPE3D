@@ -65,7 +65,7 @@ def test_stage1_lightning_module_validation_step_adds_joint_metrics(
     module = Stage1FusionLightningModule(model_config=Stage1MLPFusionConfig())
     monkeypatch.setattr(
         module,
-        "_compute_joint_metrics",
+        "_compute_canonical_joint_metrics",
         lambda **_: {
             "mpjpe": __import__("torch").tensor(12.0),
             "pa_mpjpe": __import__("torch").tensor(7.0),
@@ -96,7 +96,17 @@ def test_stage1_lightning_module_test_step_adds_input_view_metrics(
     module = Stage1FusionLightningModule(model_config=Stage1MLPFusionConfig())
     monkeypatch.setattr(
         module,
-        "_compute_joint_metrics",
+        "convert_input_views_to_smpl",
+        lambda **_: {
+            "body_pose": __import__("torch").zeros(2, 69),
+            "betas": __import__("torch").zeros(2, 10),
+            "global_orient": __import__("torch").zeros(2, 3),
+            "transl": __import__("torch").zeros(2, 3),
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "_compute_test_joint_metrics",
         lambda **_: {
             "mpjpe": __import__("torch").tensor(12.0),
             "pa_mpjpe": __import__("torch").tensor(7.0),
@@ -134,6 +144,7 @@ def test_train_script_build_data_config_disables_drop_last_in_fast_dev_run() -> 
     args = Namespace(
         manifest_path=None,
         gt_smpl_dir=None,
+        cameras_dir=None,
         split_config_path=None,
         split_name=None,
         seed=None,
@@ -157,6 +168,7 @@ def test_train_script_build_data_config_overrides_split_selection() -> None:
     args = Namespace(
         manifest_path=None,
         gt_smpl_dir="dummy_smpl",
+        cameras_dir="dummy_cameras",
         split_config_path="configs/data/humman_stage1_splits.yaml",
         split_name="random_split",
         seed=None,
@@ -177,15 +189,18 @@ def test_train_script_build_data_config_overrides_split_selection() -> None:
     )
 
     assert data_config.gt_smpl_dir == "dummy_smpl"
+    assert data_config.cameras_dir == "dummy_cameras"
     assert data_config.split_config_path == "configs/data/humman_stage1_splits.yaml"
     assert data_config.split_name == "random_split"
 
 
-def test_train_script_build_trainer_config_overrides_multi_gpu_settings() -> None:
+def test_train_script_build_trainer_config_overrides_multi_gpu_settings(monkeypatch) -> None:
     train_module = _load_train_script_module()
+    monkeypatch.setattr(train_module, "build_optional_wandb_logger", lambda **_: None)
     args = Namespace(
         manifest_path=None,
         gt_smpl_dir=None,
+        cameras_dir=None,
         split_config_path=None,
         split_name=None,
         seed=None,
@@ -215,6 +230,37 @@ def test_train_script_build_trainer_config_overrides_multi_gpu_settings() -> Non
     logger = trainer_config["logger"]
     checkpoint = trainer_config["callbacks"][0]
     assert Path(checkpoint.dirpath) == Path(logger.log_dir) / "checkpoints"
+
+
+def test_build_loggers_returns_csv_only_when_wandb_unavailable(monkeypatch) -> None:
+    train_module = _load_train_script_module()
+    monkeypatch.setattr(train_module, "build_optional_wandb_logger", lambda **_: None)
+
+    logger = train_module.build_loggers(
+        root_dir=Path("/tmp/outputs"),
+        experiment_name="stage1_cross_camera",
+    )
+
+    assert logger.__class__.__name__ == "CSVLogger"
+
+
+def test_build_loggers_adds_wandb_when_available(monkeypatch) -> None:
+    train_module = _load_train_script_module()
+
+    class DummyWandbLogger:
+        pass
+
+    dummy_logger = DummyWandbLogger()
+    monkeypatch.setattr(train_module, "build_optional_wandb_logger", lambda **_: dummy_logger)
+
+    logger = train_module.build_loggers(
+        root_dir=Path("/tmp/outputs"),
+        experiment_name="stage1_cross_camera",
+    )
+
+    assert isinstance(logger, list)
+    assert logger[0].__class__.__name__ == "CSVLogger"
+    assert logger[1] is dummy_logger
 
 
 def test_resolve_test_after_train_ckpt_path_prefers_best_checkpoint() -> None:

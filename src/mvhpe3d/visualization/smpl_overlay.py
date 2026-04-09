@@ -2,23 +2,18 @@
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
 import numpy as np
+from mvhpe3d.utils import (
+    CameraParameters,
+    camera_id_to_camera_key,
+    load_camera_parameters,
+    resolve_camera_json_path,
+)
 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
-
-
-@dataclass(frozen=True)
-class CameraParameters:
-    """One calibrated camera used for RGB overlay rendering."""
-
-    intrinsics: np.ndarray
-    rotation: np.ndarray
-    translation: np.ndarray
 
 
 def resolve_rgb_image_path(
@@ -40,47 +35,6 @@ def resolve_rgb_image_path(
     )
 
 
-def resolve_camera_json_path(cameras_dir: str | Path, *, sequence_id: str) -> Path:
-    """Resolve the HuMMan sequence-level camera JSON path."""
-    cameras_path = Path(cameras_dir).resolve() / f"{sequence_id}_cameras.json"
-    if not cameras_path.exists():
-        raise FileNotFoundError(f"Camera JSON does not exist: {cameras_path}")
-    return cameras_path
-
-
-def camera_id_to_camera_key(camera_id: str) -> str:
-    """Map manifest camera IDs to HuMMan camera JSON keys."""
-    if camera_id == "iphone":
-        return "iphone"
-    if camera_id.startswith("kinect_"):
-        suffix = camera_id.split("_", maxsplit=1)[1]
-        return f"kinect_color_{suffix}"
-    raise KeyError(f"Unsupported camera_id '{camera_id}'")
-
-
-def load_camera_parameters(
-    cameras_dir: str | Path,
-    *,
-    sequence_id: str,
-    camera_id: str,
-) -> CameraParameters:
-    """Load one camera calibration entry from the HuMMan JSON file."""
-    camera_json_path = resolve_camera_json_path(cameras_dir, sequence_id=sequence_id)
-    payload = json.loads(camera_json_path.read_text(encoding="utf-8"))
-    camera_key = camera_id_to_camera_key(camera_id)
-    if camera_key not in payload:
-        raise KeyError(
-            f"Camera key '{camera_key}' was not found in {camera_json_path}"
-        )
-
-    camera_payload = payload[camera_key]
-    return CameraParameters(
-        intrinsics=np.asarray(camera_payload["K"], dtype=np.float32),
-        rotation=np.asarray(camera_payload["R"], dtype=np.float32),
-        translation=np.asarray(camera_payload["T"], dtype=np.float32),
-    )
-
-
 def project_vertices_world_to_image(
     vertices_world: np.ndarray,
     camera: CameraParameters,
@@ -88,9 +42,21 @@ def project_vertices_world_to_image(
     """Project world-space mesh vertices into image coordinates."""
     vertices_world = np.asarray(vertices_world, dtype=np.float32)
     vertices_camera = (camera.rotation @ vertices_world.T).T + camera.translation.reshape(1, 3)
-    depths = vertices_camera[:, 2].copy()
+    return project_vertices_camera_to_image(
+        vertices_camera=vertices_camera,
+        intrinsics=camera.intrinsics,
+    )
 
-    homogeneous = (camera.intrinsics @ vertices_camera.T).T
+
+def project_vertices_camera_to_image(
+    *,
+    vertices_camera: np.ndarray,
+    intrinsics: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Project camera-frame mesh vertices into image coordinates."""
+    vertices_camera = np.asarray(vertices_camera, dtype=np.float32)
+    depths = vertices_camera[:, 2].copy()
+    homogeneous = (np.asarray(intrinsics, dtype=np.float32) @ vertices_camera.T).T
     projected = homogeneous[:, :2] / np.clip(homogeneous[:, 2:3], 1e-6, None)
     return projected.astype(np.float32, copy=False), depths.astype(np.float32, copy=False)
 
@@ -103,9 +69,44 @@ def render_projected_mesh_mask(
     camera: CameraParameters,
 ) -> np.ndarray:
     """Rasterize a coarse binary mesh mask with triangle filling."""
-    height, width = image_shape
     projected_vertices, depths = project_vertices_world_to_image(vertices_world, camera)
+    return render_projected_mesh_mask_from_projection(
+        image_shape,
+        projected_vertices=projected_vertices,
+        depths=depths,
+        faces=faces,
+    )
 
+
+def render_projected_mesh_mask_camera(
+    image_shape: tuple[int, int],
+    *,
+    vertices_camera: np.ndarray,
+    faces: np.ndarray,
+    intrinsics: np.ndarray,
+) -> np.ndarray:
+    """Rasterize a coarse binary mesh mask from camera-frame vertices."""
+    projected_vertices, depths = project_vertices_camera_to_image(
+        vertices_camera=vertices_camera,
+        intrinsics=intrinsics,
+    )
+    return render_projected_mesh_mask_from_projection(
+        image_shape,
+        projected_vertices=projected_vertices,
+        depths=depths,
+        faces=faces,
+    )
+
+
+def render_projected_mesh_mask_from_projection(
+    image_shape: tuple[int, int],
+    *,
+    projected_vertices: np.ndarray,
+    depths: np.ndarray,
+    faces: np.ndarray,
+) -> np.ndarray:
+    """Rasterize a coarse binary mesh mask with triangle filling."""
+    height, width = image_shape
     mask = np.zeros((height, width), dtype=np.uint8)
     visible_faces = np.asarray(faces, dtype=np.int32)
     face_depths = depths[visible_faces]

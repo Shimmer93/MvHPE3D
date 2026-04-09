@@ -9,6 +9,7 @@ from mvhpe3d.visualization import (
     camera_id_to_camera_key,
     load_camera_parameters,
     overlay_mask_on_image,
+    render_projected_mesh_mask_camera,
     render_projected_mesh_mask,
     resolve_camera_json_path,
     resolve_rgb_image_path,
@@ -113,3 +114,28 @@ def test_render_projected_mesh_mask_and_overlay_mask_on_image(tmp_path: Path) ->
     assert mask.any()
     assert overlay.shape == image.shape
     assert overlay[..., 1].max() > 0
+
+
+def test_render_projected_mesh_mask_camera_uses_intrinsics_only() -> None:
+    vertices_camera = np.array(
+        [
+            [-0.2, -0.2, 2.0],
+            [0.2, -0.2, 2.0],
+            [0.0, 0.2, 2.0],
+        ],
+        dtype=np.float32,
+    )
+    intrinsics = np.array(
+        [[100.0, 0.0, 50.0], [0.0, 100.0, 50.0], [0.0, 0.0, 1.0]],
+        dtype=np.float32,
+    )
+    faces = np.array([[0, 1, 2]], dtype=np.int32)
+
+    mask = render_projected_mesh_mask_camera(
+        (100, 100),
+        vertices_camera=vertices_camera,
+        faces=faces,
+        intrinsics=intrinsics,
+    )
+
+    assert mask.any()

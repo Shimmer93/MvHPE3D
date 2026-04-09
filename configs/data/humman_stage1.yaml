@@ -4,7 +4,7 @@ gt_smpl_dir: null
 split_config_path: "configs/data/humman_stage1_splits.yaml"
 split_name: "cross_camera_split"
 num_views: 2
-batch_size: 16
+batch_size: 256
 num_workers: 0
 seed: 0
 pin_memory: true

@@ -25,11 +25,11 @@ from mvhpe3d.utils import (
     build_smpl_model,
     load_experiment_config,
     resolve_smpl_model_path as resolve_smpl_model_path_impl,
+    validate_mhr_asset_folder,
 )
 from mvhpe3d.visualization import (
-    load_camera_parameters,
     overlay_mask_on_image,
-    render_projected_mesh_mask,
+    render_projected_mesh_mask_camera,
     resolve_rgb_image_path,
 )
 
@@ -104,7 +104,19 @@ def parse_args() -> argparse.Namespace:
         "--cameras-dir",
         type=str,
         default=None,
-        help="Optional override for the HuMMan camera JSON directory",
+        help="Optional override for the HuMMan camera JSON directory used by the dataset loader",
+    )
+    parser.add_argument(
+        "--mhr-assets-dir",
+        type=str,
+        default=None,
+        help="Optional override for the MHR asset directory used to place fused predictions",
+    )
+    parser.add_argument(
+        "--input-smpl-cache-dir",
+        type=str,
+        default=None,
+        help="Optional directory for caching fitted SMPL parameters converted from input views",
     )
     parser.add_argument(
         "--smpl-model-path",
@@ -125,6 +137,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     experiment = load_experiment_config(args.config)
+    validate_mhr_asset_folder(args.mhr_assets_dir or "/opt/data/assets")
     data_config = build_data_config(experiment["data"], args)
     data_config.batch_size = 1
     data_config.drop_last_train = False
@@ -148,6 +161,10 @@ def main() -> None:
     module = Stage1FusionLightningModule.load_from_checkpoint(
         args.checkpoint_path,
         map_location="cpu",
+        mhr_assets_dir=args.mhr_assets_dir,
+        smpl_model_path=args.smpl_model_path,
+        input_smpl_cache_dir=resolve_input_smpl_cache_dir(args, data_config),
+        strict=False,
     )
     module.eval()
     module.to(device)
@@ -156,11 +173,6 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     data_root = Path(data_config.manifest_path).resolve().parent
     rgb_dir = resolve_required_dir(args.rgb_dir, fallback=data_root / "rgb", name="rgb")
-    cameras_dir = resolve_required_dir(
-        args.cameras_dir,
-        fallback=data_root / "cameras",
-        name="cameras",
-    )
     smpl_model_path = resolve_smpl_model_path(args.smpl_model_path)
     smpl_model = build_smpl_model(
         device=device,
@@ -188,8 +200,8 @@ def main() -> None:
                 faces=faces,
                 device=device,
                 rgb_dir=rgb_dir,
-                cameras_dir=cameras_dir,
                 overlay_alpha=args.overlay_alpha,
+                module=module,
             )
             summaries.append(sample_summary)
             written += 1
@@ -209,6 +221,8 @@ def build_data_config(config: dict[str, Any], args: argparse.Namespace) -> Stage
         data_kwargs["manifest_path"] = args.manifest_path
     if args.gt_smpl_dir is not None:
         data_kwargs["gt_smpl_dir"] = args.gt_smpl_dir
+    if args.cameras_dir is not None:
+        data_kwargs["cameras_dir"] = args.cameras_dir
     if args.split_config_path is not None:
         data_kwargs["split_config_path"] = args.split_config_path
     if args.split_name is not None:
@@ -250,6 +264,13 @@ def resolve_smpl_model_path(path_arg: str | None) -> Path:
     return resolve_smpl_model_path_impl(path_arg)
 
 
+def resolve_input_smpl_cache_dir(args: argparse.Namespace, data_config: Stage1DataConfig) -> str:
+    if args.input_smpl_cache_dir is not None:
+        return str(Path(args.input_smpl_cache_dir).resolve())
+    manifest_parent = Path(data_config.manifest_path).resolve().parent
+    return str((manifest_parent / "sam3dbody_fitted_smpl").resolve())
+
+
 def save_sample_outputs(
     *,
     output_dir: Path,
@@ -260,8 +281,8 @@ def save_sample_outputs(
     faces: np.ndarray,
     device: torch.device,
     rgb_dir: Path,
-    cameras_dir: Path,
     overlay_alpha: float,
+    module: Stage1FusionLightningModule,
 ) -> dict[str, Any]:
     meta = batch["meta"][0]
     sample_id = str(meta["sample_id"])
@@ -272,8 +293,6 @@ def save_sample_outputs(
     pred_betas = predictions["pred_betas"][0].detach().cpu().numpy()
     gt_body_pose = batch["target_body_pose"][0].detach().cpu().numpy()
     gt_betas = batch["target_betas"][0].detach().cpu().numpy()
-    gt_global_orient = batch["target_aux"]["global_orient"][0].detach().cpu().numpy()
-    gt_transl = batch["target_aux"]["transl"][0].detach().cpu().numpy()
 
     body_pose_abs_error = np.abs(pred_body_pose - gt_body_pose)
     betas_abs_error = np.abs(pred_betas - gt_betas)
@@ -283,9 +302,9 @@ def save_sample_outputs(
         "frame_id": str(meta["frame_id"]),
         "camera_ids": [str(camera_id) for camera_id in meta["camera_ids"]],
         "placement_note": (
-            "Predicted and GT meshes are both rendered with HuMMan GT global_orient/transl "
-            "and HuMMan camera extrinsics. The prediction differs only in canonical "
-            "SMPL body_pose/betas."
+            "Predicted fused meshes use per-view SAM3DBody-predicted camera-frame placement. "
+            "GT meshes use HuMMan camera-frame placement and both are projected with the "
+            "saved per-view predicted intrinsics."
         ),
         "body_pose_mse": float(np.mean((pred_body_pose - gt_body_pose) ** 2)),
         "betas_mse": float(np.mean((pred_betas - gt_betas) ** 2)),
@@ -295,52 +314,61 @@ def save_sample_outputs(
         "betas_max_abs_error": float(np.max(betas_abs_error)),
     }
 
-    pred_vertices_world = build_smpl_vertices(
-        smpl_model=smpl_model,
-        device=device,
-        body_pose=pred_body_pose,
-        betas=pred_betas,
-        global_orient=gt_global_orient,
-        transl=gt_transl,
-    )
-    gt_vertices_world = build_smpl_vertices(
-        smpl_model=smpl_model,
-        device=device,
-        body_pose=gt_body_pose,
-        betas=gt_betas,
-        global_orient=gt_global_orient,
-        transl=gt_transl,
-    )
-
     view_panels: list[np.ndarray] = []
     view_summaries: list[dict[str, Any]] = []
-    for camera_id in meta["camera_ids"]:
+    pred_view_smpl = module.convert_input_views_to_smpl(
+        views_input=batch["views_input"].to(device),
+        pred_cam_t=batch["view_aux"]["pred_cam_t"].to(device),
+        batch_meta=batch["meta"],
+    )
+    pred_view_global_orient = pred_view_smpl["global_orient"].detach().cpu().numpy()
+    gt_view_global_orient = batch["target_aux"]["camera_global_orient"][0].detach().cpu().numpy()
+    gt_view_transl = batch["target_aux"]["camera_transl"][0].detach().cpu().numpy()
+    pred_view_transl = batch["view_aux"]["pred_cam_t"][0].detach().cpu().numpy()
+    pred_view_vertices = []
+    gt_view_vertices = []
+    for view_index, camera_id in enumerate(meta["camera_ids"]):
         image_path = resolve_rgb_image_path(
             rgb_dir,
             sequence_id=str(meta["sequence_id"]),
             camera_id=str(camera_id),
             frame_id=str(meta["frame_id"]),
         )
-        camera = load_camera_parameters(
-            cameras_dir,
-            sequence_id=str(meta["sequence_id"]),
-            camera_id=str(camera_id),
-        )
         image_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
         if image_bgr is None:
             raise FileNotFoundError(f"Failed to read RGB image: {image_path}")
+        cam_int = batch["view_aux"]["cam_int"][0, view_index].detach().cpu().numpy()
 
-        pred_mask = render_projected_mesh_mask(
-            image_bgr.shape[:2],
-            vertices_world=pred_vertices_world,
-            faces=faces,
-            camera=camera,
+        pred_vertices_camera = build_smpl_vertices(
+            smpl_model=smpl_model,
+            device=device,
+            body_pose=pred_body_pose,
+            betas=pred_betas,
+            global_orient=pred_view_global_orient[view_index],
+            transl=pred_view_transl[view_index],
         )
-        gt_mask = render_projected_mesh_mask(
+        gt_vertices_camera = build_smpl_vertices(
+            smpl_model=smpl_model,
+            device=device,
+            body_pose=gt_body_pose,
+            betas=gt_betas,
+            global_orient=gt_view_global_orient[view_index],
+            transl=gt_view_transl[view_index],
+        )
+        pred_view_vertices.append(pred_vertices_camera)
+        gt_view_vertices.append(gt_vertices_camera)
+
+        pred_mask = render_projected_mesh_mask_camera(
             image_bgr.shape[:2],
-            vertices_world=gt_vertices_world,
+            vertices_camera=pred_vertices_camera,
             faces=faces,
-            camera=camera,
+            intrinsics=cam_int,
+        )
+        gt_mask = render_projected_mesh_mask_camera(
+            image_bgr.shape[:2],
+            vertices_camera=gt_vertices_camera,
+            faces=faces,
+            intrinsics=cam_int,
         )
 
         pred_overlay = overlay_mask_on_image(
@@ -396,10 +424,10 @@ def save_sample_outputs(
             f"sample_id: {sample_id}",
             f"sequence_id: {meta['sequence_id']}  frame_id: {meta['frame_id']}",
             (
-                f"body_pose_mse={metrics['body_pose_mse']:.6f}  betas_mse={metrics['betas_mse']:.6f}  "
+            f"body_pose_mse={metrics['body_pose_mse']:.6f}  betas_mse={metrics['betas_mse']:.6f}  "
                 f"body_pose_mae={metrics['body_pose_mae']:.6f}  betas_mae={metrics['betas_mae']:.6f}"
             ),
-            "Placement: both meshes use HuMMan GT global pose and camera calibration.",
+            "Placement: fused prediction uses predicted camera-frame placement; GT uses HuMMan camera-frame pose.",
         ],
         view_panels=view_panels,
     )
@@ -411,10 +439,12 @@ def save_sample_outputs(
         gt_body_pose=gt_body_pose.astype(np.float32),
         pred_betas=pred_betas.astype(np.float32),
         gt_betas=gt_betas.astype(np.float32),
-        gt_global_orient=gt_global_orient.astype(np.float32),
-        gt_transl=gt_transl.astype(np.float32),
-        pred_vertices_world=pred_vertices_world.astype(np.float32),
-        gt_vertices_world=gt_vertices_world.astype(np.float32),
+        pred_view_global_orient=pred_view_global_orient.astype(np.float32),
+        pred_view_transl=pred_view_transl.astype(np.float32),
+        gt_view_global_orient=gt_view_global_orient.astype(np.float32),
+        gt_view_transl=gt_view_transl.astype(np.float32),
+        pred_view_vertices=np.stack(pred_view_vertices, axis=0).astype(np.float32),
+        gt_view_vertices=np.stack(gt_view_vertices, axis=0).astype(np.float32),
     )
     metrics["views"] = view_summaries
     (sample_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")

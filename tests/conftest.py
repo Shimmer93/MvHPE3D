@@ -35,15 +35,30 @@ def _write_gt_smpl_sequence(path: Path, *, num_frames: int) -> None:
     np.savez(path, **payload)
 
 
+def _write_camera_json(path: Path, *, camera_ids: list[str]) -> None:
+    payload = {}
+    for index, camera_id in enumerate(camera_ids):
+        suffix = camera_id.split("_", maxsplit=1)[1]
+        payload[f"kinect_color_{suffix}"] = {
+            "K": [[100.0, 0.0, 112.0], [0.0, 100.0, 112.0], [0.0, 0.0, 1.0]],
+            "R": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            "T": [0.05 * index, 0.0, 0.0],
+        }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 @pytest.fixture()
 def sample_manifest(tmp_path: Path) -> Path:
     cameras = ["kinect_000", "kinect_001", "kinect_002"]
     gt_smpl_dir = tmp_path / "smpl"
     gt_smpl_dir.mkdir()
+    cameras_dir = tmp_path / "cameras"
+    cameras_dir.mkdir()
     for camera_id in cameras:
         _write_prediction_npz(tmp_path / f"{camera_id}.npz")
 
     _write_gt_smpl_sequence(gt_smpl_dir / "seq_001_smpl_params.npz", num_frames=3)
+    _write_camera_json(cameras_dir / "seq_001_cameras.json", camera_ids=cameras)
 
     samples = []
     for split, frame_id in [("train", "000001"), ("val", "000002"), ("test", "000003")]:
@@ -73,6 +88,8 @@ def sample_inventory_manifest(tmp_path: Path) -> Path:
     cameras = ["kinect_000", "kinect_001", "kinect_002", "kinect_003"]
     gt_smpl_dir = tmp_path / "smpl"
     gt_smpl_dir.mkdir(exist_ok=True)
+    cameras_dir = tmp_path / "cameras"
+    cameras_dir.mkdir(exist_ok=True)
     for camera_id in cameras:
         _write_prediction_npz(tmp_path / f"{camera_id}.npz")
 
@@ -89,6 +106,7 @@ def sample_inventory_manifest(tmp_path: Path) -> Path:
             gt_smpl_dir / f"{sequence_id}_smpl_params.npz",
             num_frames=4,
         )
+        _write_camera_json(cameras_dir / f"{sequence_id}_cameras.json", camera_ids=cameras)
         samples.append(
             {
                 "sample_id": sample_id,

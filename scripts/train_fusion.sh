@@ -30,6 +30,8 @@ Optional:
   --test-after-train      Forwarded to scripts/train.py.
   --test-ckpt VALUE       Forwarded to scripts/train.py. One of: best, last, current.
   --mhr-assets-dir PATH   Forwarded to scripts/train.py for test-time input conversion.
+  --input-smpl-cache-dir PATH
+                          Optional cache directory for fitted input-view SMPL parameters.
   --default-root-dir DIR  Output root for checkpoints and logs.
                           Default: outputs/stage1
   -h, --help              Show this help message.

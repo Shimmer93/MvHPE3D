@@ -12,6 +12,7 @@ from torch.utils.data import Dataset
 
 from ..canonicalization import canonicalize_stage1_target
 from ..splits import SampleRecord
+from mvhpe3d.utils import load_camera_parameters, transform_smpl_world_to_camera
 
 
 class HuMManStage1Dataset(Dataset[dict[str, Any]]):
@@ -34,6 +35,7 @@ class HuMManStage1Dataset(Dataset[dict[str, Any]]):
         num_views: int,
         train: bool,
         gt_smpl_dir: str | Path,
+        cameras_dir: str | Path,
         seed: int = 0,
     ) -> None:
         if num_views < 1:
@@ -42,6 +44,7 @@ class HuMManStage1Dataset(Dataset[dict[str, Any]]):
         self.num_views = num_views
         self.train = train
         self.gt_smpl_dir = Path(gt_smpl_dir).resolve()
+        self.cameras_dir = Path(cameras_dir).resolve()
         self.seed = seed
         self._gt_sequence_cache: dict[str, dict[str, np.ndarray]] = {}
 
@@ -77,6 +80,11 @@ class HuMManStage1Dataset(Dataset[dict[str, Any]]):
             smpl_body_pose=self._require_field(target_payload, "body_pose", expected_last_dim=69),
             smpl_betas=self._require_field(target_payload, "betas", expected_last_dim=10),
         )
+        camera_target_aux = self._build_camera_frame_target_aux(
+            record=record,
+            camera_ids=camera_ids,
+            target_payload=target_payload,
+        )
 
         return {
             "views_input": torch.from_numpy(np.stack(view_inputs, axis=0)),
@@ -93,12 +101,15 @@ class HuMManStage1Dataset(Dataset[dict[str, Any]]):
                 "transl": torch.from_numpy(
                     self._require_field(target_payload, "transl", expected_last_dim=3)
                 ),
+                "camera_global_orient": torch.from_numpy(camera_target_aux["camera_global_orient"]),
+                "camera_transl": torch.from_numpy(camera_target_aux["camera_transl"]),
             },
             "meta": {
                 "sample_id": record.sample_id,
                 "sequence_id": record.sequence_id,
                 "frame_id": record.frame_id,
                 "camera_ids": camera_ids,
+                "view_npz_paths": [str(view.npz_path) for view in selected_views],
             },
         }
 
@@ -187,6 +198,44 @@ class HuMManStage1Dataset(Dataset[dict[str, Any]]):
         mhr_params = self._require_field(payload, "mhr_model_params", expected_last_dim=204)
         shape_params = self._require_field(payload, "shape_params", expected_last_dim=45)
         return np.concatenate([mhr_params, shape_params], axis=-1).astype(np.float32, copy=False)
+
+    def _build_camera_frame_target_aux(
+        self,
+        *,
+        record: SampleRecord,
+        camera_ids: list[str],
+        target_payload: dict[str, np.ndarray],
+    ) -> dict[str, np.ndarray]:
+        world_global_orient = self._require_field(
+            target_payload,
+            "global_orient",
+            expected_last_dim=3,
+        )
+        world_transl = self._require_field(target_payload, "transl", expected_last_dim=3)
+        camera_global_orients = []
+        camera_translations = []
+        for camera_id in camera_ids:
+            camera = load_camera_parameters(
+                self.cameras_dir,
+                sequence_id=record.sequence_id,
+                camera_id=camera_id,
+            )
+            camera_global_orient, camera_transl = transform_smpl_world_to_camera(
+                global_orient=world_global_orient,
+                transl=world_transl,
+                camera=camera,
+            )
+            camera_global_orients.append(camera_global_orient)
+            camera_translations.append(camera_transl)
+
+        return {
+            "camera_global_orient": np.ascontiguousarray(
+                np.stack(camera_global_orients, axis=0).astype(np.float32, copy=False)
+            ),
+            "camera_transl": np.ascontiguousarray(
+                np.stack(camera_translations, axis=0).astype(np.float32, copy=False)
+            ),
+        }
 
     @staticmethod
     def _frame_id_to_index(frame_id: str) -> int:

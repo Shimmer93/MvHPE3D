@@ -23,7 +23,12 @@ def batch_mpjpe(pred_joints: torch.Tensor, gt_joints: torch.Tensor) -> torch.Ten
 def batch_pa_mpjpe(pred_joints: torch.Tensor, gt_joints: torch.Tensor) -> torch.Tensor:
     """Return Procrustes-aligned MPJPE averaged over batch and joints."""
     _validate_joint_pair(pred_joints, gt_joints)
-    aligned_pred = _batch_similarity_transform(pred_joints, gt_joints)
+    with torch.autocast(device_type=pred_joints.device.type, enabled=False):
+        aligned_pred = _batch_similarity_transform(
+            pred_joints.float(),
+            gt_joints.float(),
+        )
+    aligned_pred = aligned_pred.to(pred_joints.dtype)
     return torch.linalg.norm(aligned_pred - gt_joints, dim=-1).mean()
 
 

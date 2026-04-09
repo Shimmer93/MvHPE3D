@@ -27,6 +27,7 @@ def test_humman_stage1_dataset_returns_expected_schema(sample_manifest: Path) ->
         num_views=2,
         train=False,
         gt_smpl_dir=sample_manifest.parent / "smpl",
+        cameras_dir=sample_manifest.parent / "cameras",
     )
 
     sample = dataset[0]
@@ -39,8 +40,11 @@ def test_humman_stage1_dataset_returns_expected_schema(sample_manifest: Path) ->
     assert tuple(sample["view_aux"]["image_size"].shape) == (2, 2)
     assert tuple(sample["target_aux"]["global_orient"].shape) == (3,)
     assert tuple(sample["target_aux"]["transl"].shape) == (3,)
+    assert tuple(sample["target_aux"]["camera_global_orient"].shape) == (2, 3)
+    assert tuple(sample["target_aux"]["camera_transl"].shape) == (2, 3)
     assert sample["meta"]["sample_id"] == "sample_train"
     assert len(sample["meta"]["camera_ids"]) == 2
+    assert len(sample["meta"]["view_npz_paths"]) == 2
 
 
 def test_stage1_datamodule_builds_train_val_and_test_batches(sample_manifest: Path) -> None:
@@ -66,6 +70,7 @@ def test_stage1_datamodule_builds_train_val_and_test_batches(sample_manifest: Pa
     assert train_batch["meta"][0]["sample_id"] == "sample_train"
     assert val_batch["meta"][0]["sample_id"] == "sample_val"
     assert test_batch["meta"][0]["sample_id"] == "sample_test"
+    assert len(test_batch["meta"][0]["view_npz_paths"]) == 2
 
 
 def test_resolve_split_records_filters_views_by_named_policy(

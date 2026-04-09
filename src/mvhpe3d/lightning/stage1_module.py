@@ -7,7 +7,12 @@ from dataclasses import asdict, dataclass
 import lightning as L
 import torch
 
-from mvhpe3d.metrics import SMPL_EVAL_NUM_JOINTS, batch_mpjpe, batch_pa_mpjpe, root_center_joints
+from mvhpe3d.metrics import (
+    SMPL_EVAL_NUM_JOINTS,
+    batch_mpjpe,
+    batch_pa_mpjpe,
+    root_center_joints,
+)
 from mvhpe3d.losses import Stage1LossConfig, Stage1Loss
 from mvhpe3d.models import Stage1MLPFusionConfig, Stage1MLPFusionModel
 from mvhpe3d.utils import MHRToSMPLConverter, build_smpl_model
@@ -24,6 +29,8 @@ class Stage1OptimizationConfig:
 class Stage1FusionLightningModule(L.LightningModule):
     """Lightning wrapper around the Stage 1 fusion baseline."""
 
+    strict_loading = False
+
     def __init__(
         self,
         *,
@@ -32,6 +39,7 @@ class Stage1FusionLightningModule(L.LightningModule):
         optimization_config: Stage1OptimizationConfig | None = None,
         smpl_model_path: str | None = None,
         mhr_assets_dir: str | None = None,
+        input_smpl_cache_dir: str | None = None,
     ) -> None:
         super().__init__()
         self.model_config = _coerce_dataclass_config(
@@ -48,11 +56,14 @@ class Stage1FusionLightningModule(L.LightningModule):
         )
         self.smpl_model_path = smpl_model_path
         self.mhr_assets_dir = mhr_assets_dir
+        self.input_smpl_cache_dir = input_smpl_cache_dir
 
         self.model = Stage1MLPFusionModel(self.model_config)
         self.criterion = Stage1Loss(self.loss_config)
-        self._smpl_eval_model = None
-        self._mhr_to_smpl_converter = None
+        self._runtime_cache: dict[str, object | None] = {
+            "smpl_eval_model": None,
+            "mhr_to_smpl_converter": None,
+        }
 
         self.save_hyperparameters(
             {
@@ -61,6 +72,7 @@ class Stage1FusionLightningModule(L.LightningModule):
                 "optimization_config": asdict(self.optimization_config),
                 "smpl_model_path": self.smpl_model_path,
                 "mhr_assets_dir": self.mhr_assets_dir,
+                "input_smpl_cache_dir": self.input_smpl_cache_dir,
             }
         )
 
@@ -128,8 +140,8 @@ class Stage1FusionLightningModule(L.LightningModule):
             f"{stage}/loss_body_pose": losses["loss_body_pose"],
             f"{stage}/loss_betas": losses["loss_betas"],
         }
-        if stage != "train":
-            joint_metrics = self._compute_joint_metrics(
+        if stage == "val":
+            joint_metrics = self._compute_canonical_joint_metrics(
                 pred_body_pose=predictions["pred_body_pose"],
                 pred_betas=predictions["pred_betas"],
                 target_body_pose=batch["target_body_pose"],
@@ -142,10 +154,32 @@ class Stage1FusionLightningModule(L.LightningModule):
                 }
             )
         if stage == "test":
-            input_view_metrics = self._compute_input_view_joint_metrics(
+            input_view_smpl_params = self.convert_input_views_to_smpl(
                 views_input=batch["views_input"],
+                pred_cam_t=batch["view_aux"]["pred_cam_t"],
+                batch_meta=batch["meta"],
+            )
+            joint_metrics = self._compute_test_joint_metrics(
+                pred_body_pose=predictions["pred_body_pose"],
+                pred_betas=predictions["pred_betas"],
                 target_body_pose=batch["target_body_pose"],
                 target_betas=batch["target_betas"],
+                target_aux=batch["target_aux"],
+                pred_cam_t=batch["view_aux"]["pred_cam_t"],
+                input_view_smpl_params=input_view_smpl_params,
+            )
+            metrics.update(
+                {
+                    "test/mpjpe": joint_metrics["mpjpe"],
+                    "test/pa_mpjpe": joint_metrics["pa_mpjpe"],
+                }
+            )
+            input_view_metrics = self._compute_input_view_joint_metrics(
+                input_view_smpl_params=input_view_smpl_params,
+                target_body_pose=batch["target_body_pose"],
+                target_betas=batch["target_betas"],
+                target_aux=batch["target_aux"],
+                pred_cam_t=batch["view_aux"]["pred_cam_t"],
             )
             metrics.update(
                 {
@@ -155,7 +189,7 @@ class Stage1FusionLightningModule(L.LightningModule):
             )
         return metrics
 
-    def _compute_joint_metrics(
+    def _compute_canonical_joint_metrics(
         self,
         *,
         pred_body_pose: torch.Tensor,
@@ -163,8 +197,6 @@ class Stage1FusionLightningModule(L.LightningModule):
         target_body_pose: torch.Tensor,
         target_betas: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        self._current_joint_metric_batch_size = pred_body_pose.shape[0]
-        smpl_model = self._get_smpl_eval_model(device=pred_body_pose.device)
         batch_size = pred_body_pose.shape[0]
         zero_root = torch.zeros(
             (batch_size, 3),
@@ -173,21 +205,68 @@ class Stage1FusionLightningModule(L.LightningModule):
         )
         zero_transl = torch.zeros_like(zero_root)
 
-        pred_smpl = smpl_model(
-            body_pose=pred_body_pose,
-            betas=pred_betas,
-            global_orient=zero_root,
-            transl=zero_transl,
+        pred_joints = root_center_joints(
+            self._build_smpl_joints(
+                body_pose=pred_body_pose,
+                betas=pred_betas,
+                global_orient=zero_root,
+                transl=zero_transl,
+            )
         )
-        target_smpl = smpl_model(
-            body_pose=target_body_pose,
-            betas=target_betas,
-            global_orient=zero_root,
-            transl=zero_transl,
+        target_joints = root_center_joints(
+            self._build_smpl_joints(
+                body_pose=target_body_pose,
+                betas=target_betas,
+                global_orient=zero_root,
+                transl=zero_transl,
+            )
         )
+        return {
+            "mpjpe": batch_mpjpe(pred_joints, target_joints),
+            "pa_mpjpe": batch_pa_mpjpe(pred_joints, target_joints),
+        }
 
-        pred_joints = root_center_joints(pred_smpl.joints[:, :SMPL_EVAL_NUM_JOINTS, :])
-        target_joints = root_center_joints(target_smpl.joints[:, :SMPL_EVAL_NUM_JOINTS, :])
+    def _compute_test_joint_metrics(
+        self,
+        *,
+        pred_body_pose: torch.Tensor,
+        pred_betas: torch.Tensor,
+        target_body_pose: torch.Tensor,
+        target_betas: torch.Tensor,
+        target_aux: dict[str, torch.Tensor],
+        pred_cam_t: torch.Tensor,
+        input_view_smpl_params: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        batch_size = pred_body_pose.shape[0]
+        num_views = target_aux["camera_global_orient"].shape[1]
+        repeated_pred_body_pose = self._expand_per_view_tensor(pred_body_pose, num_views=num_views)
+        repeated_pred_betas = self._expand_per_view_tensor(pred_betas, num_views=num_views)
+        repeated_target_body_pose = self._expand_per_view_tensor(
+            target_body_pose,
+            num_views=num_views,
+        )
+        repeated_target_betas = self._expand_per_view_tensor(target_betas, num_views=num_views)
+
+        pred_joints = self._build_smpl_joints(
+            body_pose=repeated_pred_body_pose,
+            betas=repeated_pred_betas,
+            global_orient=self._require_converted_parameter(
+                input_view_smpl_params,
+                "global_orient",
+                device=pred_body_pose.device,
+            ),
+            transl=pred_cam_t.reshape(batch_size * num_views, 3).to(pred_body_pose.device),
+        )
+        target_joints = self._build_smpl_joints(
+            body_pose=repeated_target_body_pose,
+            betas=repeated_target_betas,
+            global_orient=target_aux["camera_global_orient"].reshape(batch_size * num_views, 3).to(
+                pred_body_pose.device
+            ),
+            transl=target_aux["camera_transl"].reshape(batch_size * num_views, 3).to(
+                pred_body_pose.device
+            ),
+        )
         return {
             "mpjpe": batch_mpjpe(pred_joints, target_joints),
             "pa_mpjpe": batch_pa_mpjpe(pred_joints, target_joints),
@@ -196,24 +275,14 @@ class Stage1FusionLightningModule(L.LightningModule):
     def _compute_input_view_joint_metrics(
         self,
         *,
-        views_input: torch.Tensor,
+        input_view_smpl_params: dict[str, torch.Tensor],
         target_body_pose: torch.Tensor,
         target_betas: torch.Tensor,
+        target_aux: dict[str, torch.Tensor],
+        pred_cam_t: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        batch_size, num_views, _ = views_input.shape
-        flat_inputs = views_input.reshape(batch_size * num_views, -1)
-        converted_parameters = self._get_mhr_to_smpl_converter().convert(
-            mhr_model_params=flat_inputs[:, :204],
-            shape_params=flat_inputs[:, 204:249],
-        )
-        try:
-            converted_body_pose = converted_parameters["body_pose"].to(target_body_pose.device)
-            converted_betas = converted_parameters["betas"].to(target_betas.device)
-        except KeyError as exc:
-            raise KeyError(
-                "Expected converted SMPL parameters to contain 'body_pose' and 'betas'"
-            ) from exc
-
+        batch_size = target_body_pose.shape[0]
+        num_views = target_aux["camera_global_orient"].shape[1]
         repeated_target_body_pose = (
             target_body_pose[:, None, :]
             .expand(batch_size, num_views, target_body_pose.shape[-1])
@@ -224,44 +293,145 @@ class Stage1FusionLightningModule(L.LightningModule):
             .expand(batch_size, num_views, target_betas.shape[-1])
             .reshape(batch_size * num_views, -1)
         )
-        return self._compute_joint_metrics(
-            pred_body_pose=converted_body_pose,
-            pred_betas=converted_betas,
-            target_body_pose=repeated_target_body_pose,
-            target_betas=repeated_target_betas,
+        pred_joints = self._build_smpl_joints(
+            body_pose=self._require_converted_parameter(
+                input_view_smpl_params,
+                "body_pose",
+                device=target_body_pose.device,
+            ),
+            betas=self._require_converted_parameter(
+                input_view_smpl_params,
+                "betas",
+                device=target_betas.device,
+            ),
+            global_orient=self._require_converted_parameter(
+                input_view_smpl_params,
+                "global_orient",
+                device=target_body_pose.device,
+            ),
+            transl=pred_cam_t.reshape(batch_size * num_views, 3).to(target_body_pose.device),
+        )
+        target_joints = self._build_smpl_joints(
+            body_pose=repeated_target_body_pose,
+            betas=repeated_target_betas,
+            global_orient=target_aux["camera_global_orient"].reshape(batch_size * num_views, 3).to(
+                target_body_pose.device
+            ),
+            transl=target_aux["camera_transl"].reshape(batch_size * num_views, 3).to(
+                target_body_pose.device
+            ),
+        )
+        return {
+            "mpjpe": batch_mpjpe(pred_joints, target_joints),
+            "pa_mpjpe": batch_pa_mpjpe(pred_joints, target_joints),
+        }
+
+    def convert_input_views_to_smpl(
+        self,
+        *,
+        views_input: torch.Tensor,
+        pred_cam_t: torch.Tensor,
+        batch_meta: list[dict[str, object]] | None = None,
+    ) -> dict[str, torch.Tensor]:
+        batch_size, num_views, _ = views_input.shape
+        flat_inputs = views_input.reshape(batch_size * num_views, -1)
+        flat_pred_cam_t = pred_cam_t.reshape(batch_size * num_views, -1)
+        flat_source_npz_paths = None
+        if batch_meta is not None:
+            flat_source_npz_paths = []
+            for sample_meta in batch_meta:
+                sample_paths = sample_meta.get("view_npz_paths")
+                if not isinstance(sample_paths, list):
+                    raise KeyError("Expected batch meta to contain 'view_npz_paths'")
+                if len(sample_paths) != num_views:
+                    raise ValueError(
+                        "Expected each meta['view_npz_paths'] entry to match num_views, "
+                        f"got {len(sample_paths)} paths for num_views={num_views}"
+                    )
+                flat_source_npz_paths.extend(str(path) for path in sample_paths)
+        return self._get_mhr_to_smpl_converter().convert(
+            mhr_model_params=flat_inputs[:, :204],
+            shape_params=flat_inputs[:, 204:249],
+            pred_cam_t=flat_pred_cam_t,
+            source_npz_paths=flat_source_npz_paths,
         )
 
-    def _get_smpl_eval_model(self, *, device: torch.device):
-        batch_size = getattr(self, "_current_joint_metric_batch_size", 1)
-        if self._smpl_eval_model is None:
-            self._smpl_eval_model = build_smpl_model(
+    def _build_smpl_joints(
+        self,
+        *,
+        body_pose: torch.Tensor,
+        betas: torch.Tensor,
+        global_orient: torch.Tensor,
+        transl: torch.Tensor,
+    ) -> torch.Tensor:
+        smpl_model = self._get_smpl_eval_model(device=body_pose.device, batch_size=body_pose.shape[0])
+        with torch.autocast(device_type=body_pose.device.type, enabled=False):
+            output = smpl_model(
+                body_pose=body_pose.float(),
+                betas=betas.float(),
+                global_orient=global_orient.float(),
+                transl=transl.float(),
+            )
+        return output.joints[:, :SMPL_EVAL_NUM_JOINTS, :]
+
+    def _get_smpl_eval_model(self, *, device: torch.device, batch_size: int):
+        smpl_eval_model = self._runtime_cache["smpl_eval_model"]
+        if smpl_eval_model is None:
+            smpl_eval_model = build_smpl_model(
                 device=device,
                 smpl_model_path=self.smpl_model_path,
                 batch_size=batch_size,
             )
-            self._smpl_eval_model.eval()
+            smpl_eval_model.eval()
         else:
             needs_rebuild = False
-            if next(self._smpl_eval_model.parameters()).device != device:
+            assert smpl_eval_model is not None
+            if next(smpl_eval_model.parameters()).device != device:
                 needs_rebuild = True
-            if getattr(self._smpl_eval_model, "batch_size", None) != batch_size:
+            if getattr(smpl_eval_model, "batch_size", None) != batch_size:
                 needs_rebuild = True
             if needs_rebuild:
-                self._smpl_eval_model = build_smpl_model(
+                smpl_eval_model = build_smpl_model(
                     device=device,
                     smpl_model_path=self.smpl_model_path,
                     batch_size=batch_size,
                 )
-                self._smpl_eval_model.eval()
-        return self._smpl_eval_model
+                smpl_eval_model.eval()
+        self._runtime_cache["smpl_eval_model"] = smpl_eval_model
+        return smpl_eval_model
+
+    @staticmethod
+    def _expand_per_view_tensor(tensor: torch.Tensor, *, num_views: int) -> torch.Tensor:
+        return (
+            tensor[:, None, :]
+            .expand(tensor.shape[0], num_views, tensor.shape[-1])
+            .reshape(tensor.shape[0] * num_views, tensor.shape[-1])
+        )
+
+    @staticmethod
+    def _require_converted_parameter(
+        converted_parameters: dict[str, torch.Tensor],
+        key: str,
+        *,
+        device: torch.device,
+    ) -> torch.Tensor:
+        try:
+            return converted_parameters[key].to(device)
+        except KeyError as exc:
+            raise KeyError(
+                f"Expected converted SMPL parameters to contain '{key}'"
+            ) from exc
 
     def _get_mhr_to_smpl_converter(self) -> MHRToSMPLConverter:
-        if self._mhr_to_smpl_converter is None:
-            self._mhr_to_smpl_converter = MHRToSMPLConverter(
+        converter = self._runtime_cache["mhr_to_smpl_converter"]
+        if converter is None:
+            converter = MHRToSMPLConverter(
                 smpl_model_path=self.smpl_model_path,
                 mhr_assets_dir=self.mhr_assets_dir,
+                cache_dir=self.input_smpl_cache_dir,
             )
-        return self._mhr_to_smpl_converter
+            self._runtime_cache["mhr_to_smpl_converter"] = converter
+        return converter
 
     def _log_metrics_if_possible(
         self,
