@@ -101,6 +101,8 @@ class HuMManStage1Dataset(Dataset[dict[str, Any]]):
                 "transl": torch.from_numpy(
                     self._require_field(target_payload, "transl", expected_last_dim=3)
                 ),
+                "camera_rotation": torch.from_numpy(camera_target_aux["camera_rotation"]),
+                "camera_translation": torch.from_numpy(camera_target_aux["camera_translation"]),
                 "camera_global_orient": torch.from_numpy(camera_target_aux["camera_global_orient"]),
                 "camera_transl": torch.from_numpy(camera_target_aux["camera_transl"]),
             },
@@ -214,6 +216,8 @@ class HuMManStage1Dataset(Dataset[dict[str, Any]]):
         world_transl = self._require_field(target_payload, "transl", expected_last_dim=3)
         camera_global_orients = []
         camera_translations = []
+        camera_rotations = []
+        camera_translation_vectors = []
         for camera_id in camera_ids:
             camera = load_camera_parameters(
                 self.cameras_dir,
@@ -227,8 +231,16 @@ class HuMManStage1Dataset(Dataset[dict[str, Any]]):
             )
             camera_global_orients.append(camera_global_orient)
             camera_translations.append(camera_transl)
+            camera_rotations.append(np.asarray(camera.rotation, dtype=np.float32))
+            camera_translation_vectors.append(np.asarray(camera.translation, dtype=np.float32))
 
         return {
+            "camera_rotation": np.ascontiguousarray(
+                np.stack(camera_rotations, axis=0).astype(np.float32, copy=False)
+            ),
+            "camera_translation": np.ascontiguousarray(
+                np.stack(camera_translation_vectors, axis=0).astype(np.float32, copy=False)
+            ),
             "camera_global_orient": np.ascontiguousarray(
                 np.stack(camera_global_orients, axis=0).astype(np.float32, copy=False)
             ),

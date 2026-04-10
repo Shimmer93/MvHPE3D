@@ -238,7 +238,7 @@ class Stage1FusionLightningModule(L.LightningModule):
         input_view_smpl_params: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
         batch_size = pred_body_pose.shape[0]
-        num_views = target_aux["camera_global_orient"].shape[1]
+        num_views = target_aux["camera_rotation"].shape[1]
         repeated_pred_body_pose = self._expand_per_view_tensor(pred_body_pose, num_views=num_views)
         repeated_pred_betas = self._expand_per_view_tensor(pred_betas, num_views=num_views)
         repeated_target_body_pose = self._expand_per_view_tensor(
@@ -246,6 +246,14 @@ class Stage1FusionLightningModule(L.LightningModule):
             num_views=num_views,
         )
         repeated_target_betas = self._expand_per_view_tensor(target_betas, num_views=num_views)
+        repeated_target_global_orient = self._expand_per_view_tensor(
+            target_aux["global_orient"].to(pred_body_pose.device),
+            num_views=num_views,
+        )
+        repeated_target_transl = self._expand_per_view_tensor(
+            target_aux["transl"].to(pred_body_pose.device),
+            num_views=num_views,
+        )
 
         pred_joints = self._build_smpl_joints(
             body_pose=repeated_pred_body_pose,
@@ -257,13 +265,18 @@ class Stage1FusionLightningModule(L.LightningModule):
             ),
             transl=pred_cam_t.reshape(batch_size * num_views, 3).to(pred_body_pose.device),
         )
-        target_joints = self._build_smpl_joints(
+        target_world_joints = self._build_smpl_joints(
             body_pose=repeated_target_body_pose,
             betas=repeated_target_betas,
-            global_orient=target_aux["camera_global_orient"].reshape(batch_size * num_views, 3).to(
+            global_orient=repeated_target_global_orient,
+            transl=repeated_target_transl,
+        )
+        target_joints = self._transform_points_world_to_camera(
+            points_world=target_world_joints,
+            rotation=target_aux["camera_rotation"].reshape(batch_size * num_views, 3, 3).to(
                 pred_body_pose.device
             ),
-            transl=target_aux["camera_transl"].reshape(batch_size * num_views, 3).to(
+            translation=target_aux["camera_translation"].reshape(batch_size * num_views, 3).to(
                 pred_body_pose.device
             ),
         )
@@ -282,7 +295,7 @@ class Stage1FusionLightningModule(L.LightningModule):
         pred_cam_t: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         batch_size = target_body_pose.shape[0]
-        num_views = target_aux["camera_global_orient"].shape[1]
+        num_views = target_aux["camera_rotation"].shape[1]
         repeated_target_body_pose = (
             target_body_pose[:, None, :]
             .expand(batch_size, num_views, target_body_pose.shape[-1])
@@ -292,6 +305,14 @@ class Stage1FusionLightningModule(L.LightningModule):
             target_betas[:, None, :]
             .expand(batch_size, num_views, target_betas.shape[-1])
             .reshape(batch_size * num_views, -1)
+        )
+        repeated_target_global_orient = self._expand_per_view_tensor(
+            target_aux["global_orient"].to(target_body_pose.device),
+            num_views=num_views,
+        )
+        repeated_target_transl = self._expand_per_view_tensor(
+            target_aux["transl"].to(target_body_pose.device),
+            num_views=num_views,
         )
         pred_joints = self._build_smpl_joints(
             body_pose=self._require_converted_parameter(
@@ -311,13 +332,18 @@ class Stage1FusionLightningModule(L.LightningModule):
             ),
             transl=pred_cam_t.reshape(batch_size * num_views, 3).to(target_body_pose.device),
         )
-        target_joints = self._build_smpl_joints(
+        target_world_joints = self._build_smpl_joints(
             body_pose=repeated_target_body_pose,
             betas=repeated_target_betas,
-            global_orient=target_aux["camera_global_orient"].reshape(batch_size * num_views, 3).to(
+            global_orient=repeated_target_global_orient,
+            transl=repeated_target_transl,
+        )
+        target_joints = self._transform_points_world_to_camera(
+            points_world=target_world_joints,
+            rotation=target_aux["camera_rotation"].reshape(batch_size * num_views, 3, 3).to(
                 target_body_pose.device
             ),
-            transl=target_aux["camera_transl"].reshape(batch_size * num_views, 3).to(
+            translation=target_aux["camera_translation"].reshape(batch_size * num_views, 3).to(
                 target_body_pose.device
             ),
         )
@@ -407,6 +433,16 @@ class Stage1FusionLightningModule(L.LightningModule):
             .expand(tensor.shape[0], num_views, tensor.shape[-1])
             .reshape(tensor.shape[0] * num_views, tensor.shape[-1])
         )
+
+    @staticmethod
+    def _transform_points_world_to_camera(
+        *,
+        points_world: torch.Tensor,
+        rotation: torch.Tensor,
+        translation: torch.Tensor,
+    ) -> torch.Tensor:
+        rotated = torch.bmm(rotation.float(), points_world.float().transpose(1, 2)).transpose(1, 2)
+        return rotated + translation.float()[:, None, :]
 
     @staticmethod
     def _require_converted_parameter(

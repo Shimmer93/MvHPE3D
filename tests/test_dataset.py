@@ -40,6 +40,8 @@ def test_humman_stage1_dataset_returns_expected_schema(sample_manifest: Path) ->
     assert tuple(sample["view_aux"]["image_size"].shape) == (2, 2)
     assert tuple(sample["target_aux"]["global_orient"].shape) == (3,)
     assert tuple(sample["target_aux"]["transl"].shape) == (3,)
+    assert tuple(sample["target_aux"]["camera_rotation"].shape) == (2, 3, 3)
+    assert tuple(sample["target_aux"]["camera_translation"].shape) == (2, 3)
     assert tuple(sample["target_aux"]["camera_global_orient"].shape) == (2, 3)
     assert tuple(sample["target_aux"]["camera_transl"].shape) == (2, 3)
     assert sample["meta"]["sample_id"] == "sample_train"

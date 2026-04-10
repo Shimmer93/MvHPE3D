@@ -28,6 +28,7 @@ from mvhpe3d.utils import (
     validate_mhr_asset_folder,
 )
 from mvhpe3d.visualization import (
+    load_camera_parameters,
     overlay_mask_on_image,
     render_projected_mesh_mask_camera,
     resolve_rgb_image_path,
@@ -200,6 +201,7 @@ def main() -> None:
                 faces=faces,
                 device=device,
                 rgb_dir=rgb_dir,
+                cameras_dir=Path(data_config.cameras_dir).resolve(),
                 overlay_alpha=args.overlay_alpha,
                 module=module,
             )
@@ -281,6 +283,7 @@ def save_sample_outputs(
     faces: np.ndarray,
     device: torch.device,
     rgb_dir: Path,
+    cameras_dir: Path,
     overlay_alpha: float,
     module: Stage1FusionLightningModule,
 ) -> dict[str, Any]:
@@ -293,6 +296,8 @@ def save_sample_outputs(
     pred_betas = predictions["pred_betas"][0].detach().cpu().numpy()
     gt_body_pose = batch["target_body_pose"][0].detach().cpu().numpy()
     gt_betas = batch["target_betas"][0].detach().cpu().numpy()
+    gt_world_global_orient = batch["target_aux"]["global_orient"][0].detach().cpu().numpy()
+    gt_world_transl = batch["target_aux"]["transl"][0].detach().cpu().numpy()
 
     body_pose_abs_error = np.abs(pred_body_pose - gt_body_pose)
     betas_abs_error = np.abs(pred_betas - gt_betas)
@@ -302,9 +307,11 @@ def save_sample_outputs(
         "frame_id": str(meta["frame_id"]),
         "camera_ids": [str(camera_id) for camera_id in meta["camera_ids"]],
         "placement_note": (
-            "Predicted fused meshes use per-view SAM3DBody-predicted camera-frame placement. "
-            "GT meshes use HuMMan camera-frame placement and both are projected with the "
-            "saved per-view predicted intrinsics."
+            "Predicted fused meshes use per-view MHR-to-SMPL fitted camera-frame "
+            "global_orient/transl from the corresponding input view. GT meshes are "
+            "built from HuMMan world-frame SMPL and then rigidly transformed into "
+            "each camera. Predicted meshes are projected with the saved per-view "
+            "predicted intrinsics, while GT meshes are projected with HuMMan intrinsics."
         ),
         "body_pose_mse": float(np.mean((pred_body_pose - gt_body_pose) ** 2)),
         "betas_mse": float(np.mean((pred_betas - gt_betas) ** 2)),
@@ -322,9 +329,15 @@ def save_sample_outputs(
         batch_meta=batch["meta"],
     )
     pred_view_global_orient = pred_view_smpl["global_orient"].detach().cpu().numpy()
-    gt_view_global_orient = batch["target_aux"]["camera_global_orient"][0].detach().cpu().numpy()
-    gt_view_transl = batch["target_aux"]["camera_transl"][0].detach().cpu().numpy()
-    pred_view_transl = batch["view_aux"]["pred_cam_t"][0].detach().cpu().numpy()
+    pred_view_transl = pred_view_smpl["transl"].detach().cpu().numpy()
+    gt_world_vertices = build_smpl_vertices(
+        smpl_model=smpl_model,
+        device=device,
+        body_pose=gt_body_pose,
+        betas=gt_betas,
+        global_orient=gt_world_global_orient,
+        transl=gt_world_transl,
+    )
     pred_view_vertices = []
     gt_view_vertices = []
     for view_index, camera_id in enumerate(meta["camera_ids"]):
@@ -337,7 +350,13 @@ def save_sample_outputs(
         image_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
         if image_bgr is None:
             raise FileNotFoundError(f"Failed to read RGB image: {image_path}")
-        cam_int = batch["view_aux"]["cam_int"][0, view_index].detach().cpu().numpy()
+        pred_cam_int = batch["view_aux"]["cam_int"][0, view_index].detach().cpu().numpy()
+        gt_camera = load_camera_parameters(
+            cameras_dir,
+            sequence_id=str(meta["sequence_id"]),
+            camera_id=str(camera_id),
+        )
+        gt_cam_int = gt_camera.intrinsics
 
         pred_vertices_camera = build_smpl_vertices(
             smpl_model=smpl_model,
@@ -347,13 +366,10 @@ def save_sample_outputs(
             global_orient=pred_view_global_orient[view_index],
             transl=pred_view_transl[view_index],
         )
-        gt_vertices_camera = build_smpl_vertices(
-            smpl_model=smpl_model,
-            device=device,
-            body_pose=gt_body_pose,
-            betas=gt_betas,
-            global_orient=gt_view_global_orient[view_index],
-            transl=gt_view_transl[view_index],
+        gt_vertices_camera = transform_world_vertices_to_camera(
+            vertices_world=gt_world_vertices,
+            rotation=gt_camera.rotation,
+            translation=gt_camera.translation,
         )
         pred_view_vertices.append(pred_vertices_camera)
         gt_view_vertices.append(gt_vertices_camera)
@@ -362,13 +378,13 @@ def save_sample_outputs(
             image_bgr.shape[:2],
             vertices_camera=pred_vertices_camera,
             faces=faces,
-            intrinsics=cam_int,
+            intrinsics=pred_cam_int,
         )
         gt_mask = render_projected_mesh_mask_camera(
             image_bgr.shape[:2],
             vertices_camera=gt_vertices_camera,
             faces=faces,
-            intrinsics=cam_int,
+            intrinsics=gt_cam_int,
         )
 
         pred_overlay = overlay_mask_on_image(
@@ -413,6 +429,9 @@ def save_sample_outputs(
                 "gt_visible": bool(gt_mask.any()),
                 "pred_mask_pixels": int(np.count_nonzero(pred_mask)),
                 "gt_mask_pixels": int(np.count_nonzero(gt_mask)),
+                "pred_cam_int": pred_cam_int.astype(np.float32).tolist(),
+                "gt_cam_int": gt_cam_int.astype(np.float32).tolist(),
+                "gt_vertices_source": "smpl_rebuild",
             }
         )
         cv2.imwrite(str(sample_dir / f"{camera_id}_pred_overlay.png"), pred_overlay)
@@ -427,7 +446,7 @@ def save_sample_outputs(
             f"body_pose_mse={metrics['body_pose_mse']:.6f}  betas_mse={metrics['betas_mse']:.6f}  "
                 f"body_pose_mae={metrics['body_pose_mae']:.6f}  betas_mae={metrics['betas_mae']:.6f}"
             ),
-            "Placement: fused prediction uses predicted camera-frame placement; GT uses HuMMan camera-frame pose.",
+            "Projection: prediction uses saved cam_int; GT uses HuMMan K after world-to-camera transform.",
         ],
         view_panels=view_panels,
     )
@@ -441,8 +460,8 @@ def save_sample_outputs(
         gt_betas=gt_betas.astype(np.float32),
         pred_view_global_orient=pred_view_global_orient.astype(np.float32),
         pred_view_transl=pred_view_transl.astype(np.float32),
-        gt_view_global_orient=gt_view_global_orient.astype(np.float32),
-        gt_view_transl=gt_view_transl.astype(np.float32),
+        gt_world_global_orient=gt_world_global_orient.astype(np.float32),
+        gt_world_transl=gt_world_transl.astype(np.float32),
         pred_view_vertices=np.stack(pred_view_vertices, axis=0).astype(np.float32),
         gt_view_vertices=np.stack(gt_view_vertices, axis=0).astype(np.float32),
     )
@@ -474,6 +493,17 @@ def build_smpl_vertices(
     )
     return output.vertices[0].detach().cpu().numpy()
 
+
+def transform_world_vertices_to_camera(
+    *,
+    vertices_world: np.ndarray,
+    rotation: np.ndarray,
+    translation: np.ndarray,
+) -> np.ndarray:
+    vertices_world = np.asarray(vertices_world, dtype=np.float32)
+    rotation = np.asarray(rotation, dtype=np.float32)
+    translation = np.asarray(translation, dtype=np.float32).reshape(1, 3)
+    return np.ascontiguousarray((rotation @ vertices_world.T).T + translation)
 
 def build_view_panel(items: list[tuple[str, np.ndarray]], *, footer: str) -> np.ndarray:
     tile_height, tile_width = items[0][1].shape[:2]
