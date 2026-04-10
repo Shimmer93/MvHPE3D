@@ -77,7 +77,7 @@ class Stage1FusionLightningModule(L.LightningModule):
         )
 
     def forward(self, views_input: torch.Tensor) -> dict[str, torch.Tensor]:
-        return self.model(views_input)
+        return self.model(self._preprocess_views_input(views_input))
 
     def training_step(self, batch, batch_idx):
         metrics = self._shared_step(batch, stage="train")
@@ -238,7 +238,7 @@ class Stage1FusionLightningModule(L.LightningModule):
         input_view_smpl_params: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
         batch_size = pred_body_pose.shape[0]
-        num_views = target_aux["camera_rotation"].shape[1]
+        num_views = pred_cam_t.shape[1]
         repeated_pred_body_pose = self._expand_per_view_tensor(pred_body_pose, num_views=num_views)
         repeated_pred_betas = self._expand_per_view_tensor(pred_betas, num_views=num_views)
         repeated_target_body_pose = self._expand_per_view_tensor(
@@ -246,39 +246,23 @@ class Stage1FusionLightningModule(L.LightningModule):
             num_views=num_views,
         )
         repeated_target_betas = self._expand_per_view_tensor(target_betas, num_views=num_views)
-        repeated_target_global_orient = self._expand_per_view_tensor(
-            target_aux["global_orient"].to(pred_body_pose.device),
-            num_views=num_views,
+        input_global_orient = self._require_converted_parameter(
+            input_view_smpl_params,
+            "global_orient",
+            device=pred_body_pose.device,
         )
-        repeated_target_transl = self._expand_per_view_tensor(
-            target_aux["transl"].to(pred_body_pose.device),
-            num_views=num_views,
-        )
-
+        input_transl = pred_cam_t.reshape(batch_size * num_views, 3).to(pred_body_pose.device)
         pred_joints = self._build_smpl_joints(
             body_pose=repeated_pred_body_pose,
             betas=repeated_pred_betas,
-            global_orient=self._require_converted_parameter(
-                input_view_smpl_params,
-                "global_orient",
-                device=pred_body_pose.device,
-            ),
-            transl=pred_cam_t.reshape(batch_size * num_views, 3).to(pred_body_pose.device),
+            global_orient=input_global_orient,
+            transl=input_transl,
         )
-        target_world_joints = self._build_smpl_joints(
+        target_joints = self._build_smpl_joints(
             body_pose=repeated_target_body_pose,
             betas=repeated_target_betas,
-            global_orient=repeated_target_global_orient,
-            transl=repeated_target_transl,
-        )
-        target_joints = self._transform_points_world_to_camera(
-            points_world=target_world_joints,
-            rotation=target_aux["camera_rotation"].reshape(batch_size * num_views, 3, 3).to(
-                pred_body_pose.device
-            ),
-            translation=target_aux["camera_translation"].reshape(batch_size * num_views, 3).to(
-                pred_body_pose.device
-            ),
+            global_orient=input_global_orient,
+            transl=input_transl,
         )
         return {
             "mpjpe": batch_mpjpe(pred_joints, target_joints),
@@ -295,7 +279,7 @@ class Stage1FusionLightningModule(L.LightningModule):
         pred_cam_t: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         batch_size = target_body_pose.shape[0]
-        num_views = target_aux["camera_rotation"].shape[1]
+        num_views = pred_cam_t.shape[1]
         repeated_target_body_pose = (
             target_body_pose[:, None, :]
             .expand(batch_size, num_views, target_body_pose.shape[-1])
@@ -306,14 +290,12 @@ class Stage1FusionLightningModule(L.LightningModule):
             .expand(batch_size, num_views, target_betas.shape[-1])
             .reshape(batch_size * num_views, -1)
         )
-        repeated_target_global_orient = self._expand_per_view_tensor(
-            target_aux["global_orient"].to(target_body_pose.device),
-            num_views=num_views,
+        input_global_orient = self._require_converted_parameter(
+            input_view_smpl_params,
+            "global_orient",
+            device=target_body_pose.device,
         )
-        repeated_target_transl = self._expand_per_view_tensor(
-            target_aux["transl"].to(target_body_pose.device),
-            num_views=num_views,
-        )
+        input_transl = pred_cam_t.reshape(batch_size * num_views, 3).to(target_body_pose.device)
         pred_joints = self._build_smpl_joints(
             body_pose=self._require_converted_parameter(
                 input_view_smpl_params,
@@ -325,27 +307,14 @@ class Stage1FusionLightningModule(L.LightningModule):
                 "betas",
                 device=target_betas.device,
             ),
-            global_orient=self._require_converted_parameter(
-                input_view_smpl_params,
-                "global_orient",
-                device=target_body_pose.device,
-            ),
-            transl=pred_cam_t.reshape(batch_size * num_views, 3).to(target_body_pose.device),
+            global_orient=input_global_orient,
+            transl=input_transl,
         )
-        target_world_joints = self._build_smpl_joints(
+        target_joints = self._build_smpl_joints(
             body_pose=repeated_target_body_pose,
             betas=repeated_target_betas,
-            global_orient=repeated_target_global_orient,
-            transl=repeated_target_transl,
-        )
-        target_joints = self._transform_points_world_to_camera(
-            points_world=target_world_joints,
-            rotation=target_aux["camera_rotation"].reshape(batch_size * num_views, 3, 3).to(
-                target_body_pose.device
-            ),
-            translation=target_aux["camera_translation"].reshape(batch_size * num_views, 3).to(
-                target_body_pose.device
-            ),
+            global_orient=input_global_orient,
+            transl=input_transl,
         )
         return {
             "mpjpe": batch_mpjpe(pred_joints, target_joints),
@@ -487,6 +456,18 @@ class Stage1FusionLightningModule(L.LightningModule):
             prog_bar=prog_bar,
             batch_size=batch_size,
         )
+
+    def _preprocess_views_input(self, views_input: torch.Tensor) -> torch.Tensor:
+        if not self.model_config.zero_mhr_root_input:
+            return views_input
+        if views_input.shape[-1] < 6:
+            raise ValueError(
+                "Expected views_input trailing dimension >= 6 when zero_mhr_root_input is enabled, "
+                f"got {views_input.shape[-1]}"
+            )
+        processed = views_input.clone()
+        processed[..., :6] = 0.0
+        return processed
 
 
 def _coerce_dataclass_config(value, config_type):

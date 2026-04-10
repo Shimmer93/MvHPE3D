@@ -15,6 +15,7 @@ class Stage1MLPFusionConfig:
     """Configuration for the Stage 1 baseline fusion model."""
 
     input_dim: int = 249
+    zero_mhr_root_input: bool = False
     body_pose_dim: int = 69
     betas_dim: int = 10
     hidden_dim: int = 256

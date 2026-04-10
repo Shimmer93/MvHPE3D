@@ -1,18 +1,18 @@
 #!/usr/bin/env python
-"""Visualize predicted and GT SMPL meshes overlaid on RGB images."""
+"""Render per-sequence MP4 videos with input, fused prediction, and GT SMPL overlays."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
@@ -37,7 +37,7 @@ from mvhpe3d.visualization import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Save predicted-vs-GT SMPL mesh overlays for a trained Stage 1 checkpoint"
+        description="Save per-sequence MP4 videos with input, predicted, and GT SMPL overlays"
     )
     parser.add_argument("--checkpoint-path", type=str, required=True, help="Path to .ckpt file")
     parser.add_argument(
@@ -78,16 +78,10 @@ def parse_args() -> argparse.Namespace:
         help="Which split to visualize",
     )
     parser.add_argument(
-        "--num-samples",
-        type=int,
-        default=8,
-        help="Number of samples to visualize",
-    )
-    parser.add_argument(
         "--output-dir",
         type=str,
-        default="outputs/stage1_visualizations",
-        help="Directory to save the visualizations",
+        default="outputs/stage1_videos",
+        help="Directory to save the MP4 videos",
     )
     parser.add_argument(
         "--device",
@@ -111,7 +105,7 @@ def parse_args() -> argparse.Namespace:
         "--mhr-assets-dir",
         type=str,
         default=None,
-        help="Optional override for the MHR asset directory used to place fused predictions",
+        help="Optional override for the MHR asset directory used for input-view conversion",
     )
     parser.add_argument(
         "--input-smpl-cache-dir",
@@ -131,32 +125,65 @@ def parse_args() -> argparse.Namespace:
         default=0.55,
         help="Alpha used for semi-transparent mesh overlays",
     )
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=10.0,
+        help="Frames per second for the output MP4",
+    )
+    parser.add_argument(
+        "--codec",
+        type=str,
+        default="mp4v",
+        help="FourCC codec for cv2.VideoWriter, e.g. mp4v or avc1",
+    )
+    parser.add_argument(
+        "--sequence-id",
+        type=str,
+        default=None,
+        help="Optional single sequence_id to visualize",
+    )
+    parser.add_argument(
+        "--max-sequences",
+        type=int,
+        default=None,
+        help="Optional cap on the number of output videos",
+    )
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=None,
+        help="Optional cap on the number of frames per sequence",
+    )
+    parser.add_argument(
+        "--frame-step",
+        type=int,
+        default=1,
+        help="Use every Nth frame in each sequence",
+    )
     parser.add_argument("--seed", type=int, default=None, help="Optional override for experiment seed")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if args.frame_step < 1:
+        raise ValueError(f"--frame-step must be >= 1, got {args.frame_step}")
+    if args.fps <= 0:
+        raise ValueError(f"--fps must be > 0, got {args.fps}")
+
     experiment = load_experiment_config(args.config)
     validate_mhr_asset_folder(args.mhr_assets_dir or "/opt/data/assets")
+
     data_config = build_data_config(experiment["data"], args)
     data_config.batch_size = 1
     data_config.drop_last_train = False
-
     if args.seed is not None:
         data_config.seed = args.seed
 
     datamodule = Stage1HuMManDataModule(data_config)
     datamodule.setup(None)
     dataset = select_dataset(datamodule, args.stage)
-    dataloader = DataLoader(
-        dataset,
-        batch_size=1,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=False,
-        collate_fn=multiview_collate,
-    )
 
     device = resolve_device(args.device)
     module = Stage1FusionLightningModule.load_from_checkpoint(
@@ -174,6 +201,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     data_root = Path(data_config.manifest_path).resolve().parent
     rgb_dir = resolve_required_dir(args.rgb_dir, fallback=data_root / "rgb", name="rgb")
+    cameras_dir = Path(data_config.cameras_dir).resolve()
     smpl_model_path = resolve_smpl_model_path(args.smpl_model_path)
     smpl_model = build_smpl_model(
         device=device,
@@ -182,35 +210,82 @@ def main() -> None:
     )
     faces = np.asarray(smpl_model.faces, dtype=np.int32)
 
-    written = 0
+    grouped_indices = build_sequence_index(dataset)
+    selected_sequence_ids = sorted(grouped_indices)
+    if args.sequence_id is not None:
+        if args.sequence_id not in grouped_indices:
+            raise KeyError(
+                f"sequence_id '{args.sequence_id}' was not found in the selected {args.stage} split"
+            )
+        selected_sequence_ids = [args.sequence_id]
+    if args.max_sequences is not None:
+        selected_sequence_ids = selected_sequence_ids[: args.max_sequences]
+
     summaries = []
-    with torch.no_grad():
-        for batch in dataloader:
-            if written >= args.num_samples:
-                break
+    for sequence_id in selected_sequence_ids:
+        frame_indices = grouped_indices[sequence_id][:: args.frame_step]
+        if args.max_frames is not None:
+            frame_indices = frame_indices[: args.max_frames]
+        if not frame_indices:
+            continue
 
-            views_input = batch["views_input"].to(device)
-            predictions = module(views_input)
+        video_path = output_dir / f"{sequence_id}.mp4"
+        writer: cv2.VideoWriter | None = None
+        frame_width: int | None = None
+        frame_height: int | None = None
+        written_frames = 0
 
-            sample_summary = save_sample_outputs(
-                output_dir=output_dir,
-                sample_index=written,
+        for dataset_index in frame_indices:
+            batch = multiview_collate([dataset[dataset_index]])
+            frame_image, frame_summary = build_video_frame(
                 batch=batch,
-                predictions=predictions,
+                module=module,
                 smpl_model=smpl_model,
                 faces=faces,
                 device=device,
                 rgb_dir=rgb_dir,
-                cameras_dir=Path(data_config.cameras_dir).resolve(),
+                cameras_dir=cameras_dir,
                 overlay_alpha=args.overlay_alpha,
-                module=module,
             )
-            summaries.append(sample_summary)
-            written += 1
+            if writer is None:
+                frame_height, frame_width = frame_image.shape[:2]
+                writer = cv2.VideoWriter(
+                    str(video_path),
+                    cv2.VideoWriter_fourcc(*args.codec),
+                    args.fps,
+                    (frame_width, frame_height),
+                )
+                if not writer.isOpened():
+                    raise RuntimeError(
+                        f"Failed to open video writer for {video_path} with codec '{args.codec}'"
+                    )
+            else:
+                assert frame_width is not None and frame_height is not None
+                if frame_image.shape[1] != frame_width or frame_image.shape[0] != frame_height:
+                    frame_image = cv2.resize(
+                        frame_image,
+                        (frame_width, frame_height),
+                        interpolation=cv2.INTER_LINEAR,
+                    )
+            writer.write(frame_image)
+            written_frames += 1
+
+        if writer is not None:
+            writer.release()
+
+        summaries.append(
+            {
+                "sequence_id": sequence_id,
+                "video_path": str(video_path),
+                "num_frames": written_frames,
+                "stage": args.stage,
+                "fps": args.fps,
+            }
+        )
+        print(f"Saved {written_frames} frames to {video_path}")
 
     summary_path = output_dir / "summary.json"
-    summary_path.write_text(json.dumps({"samples": summaries}, indent=2), encoding="utf-8")
-    print(f"Saved {written} visualization samples to {output_dir}")
+    summary_path.write_text(json.dumps({"videos": summaries}, indent=2), encoding="utf-8")
     print(f"Saved summary to {summary_path}")
 
 
@@ -273,24 +348,41 @@ def resolve_input_smpl_cache_dir(args: argparse.Namespace, data_config: Stage1Da
     return str((manifest_parent / "sam3dbody_fitted_smpl").resolve())
 
 
-def save_sample_outputs(
+def build_sequence_index(dataset) -> dict[str, list[int]]:
+    grouped: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    for index, record in enumerate(dataset.records):
+        grouped[record.sequence_id].append((int(record.frame_id), index))
+    return {
+        sequence_id: [index for _, index in sorted(items)]
+        for sequence_id, items in grouped.items()
+    }
+
+
+def build_video_frame(
     *,
-    output_dir: Path,
-    sample_index: int,
     batch: dict[str, Any],
-    predictions: dict[str, torch.Tensor],
+    module: Stage1FusionLightningModule,
     smpl_model,
     faces: np.ndarray,
     device: torch.device,
     rgb_dir: Path,
     cameras_dir: Path,
     overlay_alpha: float,
-    module: Stage1FusionLightningModule,
-) -> dict[str, Any]:
+) -> tuple[np.ndarray, dict[str, Any]]:
     meta = batch["meta"][0]
     sample_id = str(meta["sample_id"])
-    sample_dir = output_dir / f"{sample_index:03d}_{sample_id}"
-    sample_dir.mkdir(parents=True, exist_ok=True)
+    sequence_id = str(meta["sequence_id"])
+    frame_id = str(meta["frame_id"])
+
+    views_input = batch["views_input"].to(device)
+    pred_cam_t = batch["view_aux"]["pred_cam_t"].to(device)
+    with torch.no_grad():
+        predictions = module(views_input)
+    input_view_smpl = module.convert_input_views_to_smpl(
+        views_input=views_input,
+        pred_cam_t=pred_cam_t,
+        batch_meta=batch["meta"],
+    )
 
     pred_body_pose = predictions["pred_body_pose"][0].detach().cpu().numpy()
     pred_betas = predictions["pred_betas"][0].detach().cpu().numpy()
@@ -299,36 +391,12 @@ def save_sample_outputs(
     gt_world_global_orient = batch["target_aux"]["global_orient"][0].detach().cpu().numpy()
     gt_world_transl = batch["target_aux"]["transl"][0].detach().cpu().numpy()
 
-    body_pose_abs_error = np.abs(pred_body_pose - gt_body_pose)
-    betas_abs_error = np.abs(pred_betas - gt_betas)
-    metrics = {
-        "sample_id": sample_id,
-        "sequence_id": str(meta["sequence_id"]),
-        "frame_id": str(meta["frame_id"]),
-        "camera_ids": [str(camera_id) for camera_id in meta["camera_ids"]],
-        "placement_note": (
-            "Predicted fused meshes are canonical bodies placed in each input "
-            "view frame using the input-view fitted SMPL root pose directly, and projected "
-            "with per-view input intrinsics. GT meshes are built from HuMMan "
-            "world-frame SMPL and projected with HuMMan GT cameras."
-        ),
-        "body_pose_mse": float(np.mean((pred_body_pose - gt_body_pose) ** 2)),
-        "betas_mse": float(np.mean((pred_betas - gt_betas) ** 2)),
-        "body_pose_mae": float(np.mean(body_pose_abs_error)),
-        "betas_mae": float(np.mean(betas_abs_error)),
-        "body_pose_max_abs_error": float(np.max(body_pose_abs_error)),
-        "betas_max_abs_error": float(np.max(betas_abs_error)),
-    }
+    input_body_pose = input_view_smpl["body_pose"].detach().cpu().numpy()
+    input_betas = input_view_smpl["betas"].detach().cpu().numpy()
+    input_global_orient = input_view_smpl["global_orient"].detach().cpu().numpy()
+    input_transl = input_view_smpl["transl"].detach().cpu().numpy()
+    zero_root = np.zeros(3, dtype=np.float32)
 
-    view_panels: list[np.ndarray] = []
-    view_summaries: list[dict[str, Any]] = []
-    pred_view_smpl = module.convert_input_views_to_smpl(
-        views_input=batch["views_input"].to(device),
-        pred_cam_t=batch["view_aux"]["pred_cam_t"].to(device),
-        batch_meta=batch["meta"],
-    )
-    pred_view_global_orient = pred_view_smpl["global_orient"].detach().cpu().numpy()
-    pred_view_transl = pred_view_smpl["transl"].detach().cpu().numpy()
     gt_world_vertices, _ = build_smpl_outputs(
         smpl_model=smpl_model,
         device=device,
@@ -337,41 +405,69 @@ def save_sample_outputs(
         global_orient=gt_world_global_orient,
         transl=gt_world_transl,
     )
-    pred_view_vertices = []
-    gt_view_vertices = []
+
+    view_panels: list[np.ndarray] = []
+    per_view_summary: list[dict[str, Any]] = []
+
     for view_index, camera_id in enumerate(meta["camera_ids"]):
         image_path = resolve_rgb_image_path(
             rgb_dir,
-            sequence_id=str(meta["sequence_id"]),
+            sequence_id=sequence_id,
             camera_id=str(camera_id),
-            frame_id=str(meta["frame_id"]),
+            frame_id=frame_id,
         )
         image_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
         if image_bgr is None:
             raise FileNotFoundError(f"Failed to read RGB image: {image_path}")
+
         pred_cam_int = batch["view_aux"]["cam_int"][0, view_index].detach().cpu().numpy()
         gt_camera = load_camera_parameters(
             cameras_dir,
-            sequence_id=str(meta["sequence_id"]),
+            sequence_id=sequence_id,
             camera_id=str(camera_id),
         )
-        gt_cam_int = gt_camera.intrinsics
-        pred_vertices_camera, _ = build_smpl_outputs(
+
+        input_vertices_camera, input_joints_camera = build_smpl_outputs(
+            smpl_model=smpl_model,
+            device=device,
+            body_pose=input_body_pose[view_index],
+            betas=input_betas[view_index],
+            global_orient=input_global_orient[view_index],
+            transl=input_transl[view_index],
+        )
+        _, input_joints_canonical = build_smpl_outputs(
+            smpl_model=smpl_model,
+            device=device,
+            body_pose=input_body_pose[view_index],
+            betas=input_betas[view_index],
+            global_orient=zero_root,
+            transl=zero_root,
+        )
+        pred_vertices_canonical, _ = build_smpl_outputs(
             smpl_model=smpl_model,
             device=device,
             body_pose=pred_body_pose,
             betas=pred_betas,
-            global_orient=pred_view_global_orient[view_index],
-            transl=pred_view_transl[view_index],
+            global_orient=zero_root,
+            transl=zero_root,
+        )
+        pred_vertices_camera = map_canonical_vertices_to_input_frame(
+            canonical_vertices=pred_vertices_canonical,
+            input_canonical_joints=input_joints_canonical,
+            input_camera_joints=input_joints_camera,
         )
         gt_vertices_camera = transform_world_vertices_to_camera(
             vertices_world=gt_world_vertices,
             rotation=gt_camera.rotation,
             translation=gt_camera.translation,
         )
-        pred_view_vertices.append(pred_vertices_camera)
-        gt_view_vertices.append(gt_vertices_camera)
 
+        input_mask = render_projected_mesh_mask_camera(
+            image_bgr.shape[:2],
+            vertices_camera=input_vertices_camera,
+            faces=faces,
+            intrinsics=pred_cam_int,
+        )
         pred_mask = render_projected_mesh_mask_camera(
             image_bgr.shape[:2],
             vertices_camera=pred_vertices_camera,
@@ -382,9 +478,15 @@ def save_sample_outputs(
             image_bgr.shape[:2],
             vertices_camera=gt_vertices_camera,
             faces=faces,
-            intrinsics=gt_cam_int,
+            intrinsics=gt_camera.intrinsics,
         )
 
+        input_overlay = overlay_mask_on_image(
+            image_bgr,
+            input_mask,
+            color=(0, 190, 255),
+            alpha=overlay_alpha,
+        )
         pred_overlay = overlay_mask_on_image(
             image_bgr,
             pred_mask,
@@ -402,70 +504,54 @@ def save_sample_outputs(
                 image_bgr,
                 gt_mask,
                 color=(70, 210, 70),
-                alpha=overlay_alpha,
+                alpha=overlay_alpha * 0.8,
             ),
             pred_mask,
             color=(40, 70, 230),
-            alpha=overlay_alpha,
+            alpha=overlay_alpha * 0.8,
         )
 
-        panel = build_view_panel(
-            [
-                ("RGB", image_bgr),
-                ("Pred Overlay", pred_overlay),
-                ("GT Overlay", gt_overlay),
-                ("Combined", combined_overlay),
-            ],
-            footer=f"{camera_id}  pred_px={int(pred_mask.sum() > 0)}  gt_px={int(gt_mask.sum() > 0)}",
+        view_panels.append(
+            build_view_panel(
+                [
+                    ("RGB", image_bgr),
+                    ("Input", input_overlay),
+                    ("Pred", pred_overlay),
+                    ("GT", gt_overlay),
+                    ("Combined", combined_overlay),
+                ],
+                footer=(
+                    f"{camera_id}  "
+                    f"in={int(input_mask.any())}  pred={int(pred_mask.any())}  gt={int(gt_mask.any())}"
+                ),
+            )
         )
-        view_panels.append(panel)
-        view_summaries.append(
+        per_view_summary.append(
             {
                 "camera_id": str(camera_id),
                 "image_path": str(image_path),
+                "input_visible": bool(input_mask.any()),
                 "pred_visible": bool(pred_mask.any()),
                 "gt_visible": bool(gt_mask.any()),
-                "pred_mask_pixels": int(np.count_nonzero(pred_mask)),
-                "gt_mask_pixels": int(np.count_nonzero(gt_mask)),
-                "pred_cam_int": pred_cam_int.astype(np.float32).tolist(),
-                "gt_cam_int": gt_cam_int.astype(np.float32).tolist(),
-                "gt_vertices_source": "smpl_rebuild",
             }
         )
-        cv2.imwrite(str(sample_dir / f"{camera_id}_pred_overlay.png"), pred_overlay)
-        cv2.imwrite(str(sample_dir / f"{camera_id}_gt_overlay.png"), gt_overlay)
-        cv2.imwrite(str(sample_dir / f"{camera_id}_combined_overlay.png"), combined_overlay)
 
-    summary_image = build_contact_sheet(
+    body_pose_mae = float(np.mean(np.abs(pred_body_pose - gt_body_pose)))
+    betas_mae = float(np.mean(np.abs(pred_betas - gt_betas)))
+    frame_image = build_contact_sheet(
         title_lines=[
-            f"sample_id: {sample_id}",
-            f"sequence_id: {meta['sequence_id']}  frame_id: {meta['frame_id']}",
-            (
-            f"body_pose_mse={metrics['body_pose_mse']:.6f}  betas_mse={metrics['betas_mse']:.6f}  "
-                f"body_pose_mae={metrics['body_pose_mae']:.6f}  betas_mae={metrics['betas_mae']:.6f}"
-            ),
-            "Projection: pred uses input-view fitted root pose + input cam_int; GT uses HuMMan GT cameras.",
+            f"sequence_id: {sequence_id}  frame_id: {frame_id}  sample_id: {sample_id}",
+            f"body_pose_mae={body_pose_mae:.6f}  betas_mae={betas_mae:.6f}",
+            "Panels: RGB, input SMPL, fused prediction, GT, combined",
         ],
         view_panels=view_panels,
     )
-
-    cv2.imwrite(str(sample_dir / "comparison.png"), summary_image)
-    np.savez_compressed(
-        sample_dir / "arrays.npz",
-        pred_body_pose=pred_body_pose.astype(np.float32),
-        gt_body_pose=gt_body_pose.astype(np.float32),
-        pred_betas=pred_betas.astype(np.float32),
-        gt_betas=gt_betas.astype(np.float32),
-        pred_view_global_orient=pred_view_global_orient.astype(np.float32),
-        pred_view_transl=pred_view_transl.astype(np.float32),
-        gt_world_global_orient=gt_world_global_orient.astype(np.float32),
-        gt_world_transl=gt_world_transl.astype(np.float32),
-        pred_view_vertices=np.stack(pred_view_vertices, axis=0).astype(np.float32),
-        gt_view_vertices=np.stack(gt_view_vertices, axis=0).astype(np.float32),
-    )
-    metrics["views"] = view_summaries
-    (sample_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
-    return metrics
+    return frame_image, {
+        "sample_id": sample_id,
+        "sequence_id": sequence_id,
+        "frame_id": frame_id,
+        "views": per_view_summary,
+    }
 
 
 def build_smpl_vertices(
@@ -479,9 +565,9 @@ def build_smpl_vertices(
 ) -> np.ndarray:
     body_pose_tensor = torch.as_tensor(body_pose, dtype=torch.float32, device=device).view(1, -1)
     betas_tensor = torch.as_tensor(betas, dtype=torch.float32, device=device).view(1, -1)
-    global_orient_tensor = torch.as_tensor(
-        global_orient, dtype=torch.float32, device=device
-    ).view(1, -1)
+    global_orient_tensor = torch.as_tensor(global_orient, dtype=torch.float32, device=device).view(
+        1, -1
+    )
     transl_tensor = torch.as_tensor(transl, dtype=torch.float32, device=device).view(1, -1)
     output = smpl_model(
         body_pose=body_pose_tensor,
@@ -503,9 +589,9 @@ def build_smpl_outputs(
 ) -> tuple[np.ndarray, np.ndarray]:
     body_pose_tensor = torch.as_tensor(body_pose, dtype=torch.float32, device=device).view(1, -1)
     betas_tensor = torch.as_tensor(betas, dtype=torch.float32, device=device).view(1, -1)
-    global_orient_tensor = torch.as_tensor(
-        global_orient, dtype=torch.float32, device=device
-    ).view(1, -1)
+    global_orient_tensor = torch.as_tensor(global_orient, dtype=torch.float32, device=device).view(
+        1, -1
+    )
     transl_tensor = torch.as_tensor(transl, dtype=torch.float32, device=device).view(1, -1)
     output = smpl_model(
         body_pose=body_pose_tensor,
@@ -518,6 +604,46 @@ def build_smpl_outputs(
         output.joints[0].detach().cpu().numpy(),
     )
 
+
+def map_canonical_vertices_to_input_frame(
+    *,
+    canonical_vertices: np.ndarray,
+    input_canonical_joints: np.ndarray,
+    input_camera_joints: np.ndarray,
+) -> np.ndarray:
+    rotation_matrix, translation = estimate_rigid_transform(
+        source_points=np.asarray(input_canonical_joints, dtype=np.float32),
+        target_points=np.asarray(input_camera_joints, dtype=np.float32),
+    )
+    canonical_vertices = np.asarray(canonical_vertices, dtype=np.float32)
+    transformed = (rotation_matrix @ canonical_vertices.T).T + translation.reshape(1, 3)
+    return np.ascontiguousarray(transformed)
+
+
+def estimate_rigid_transform(
+    *,
+    source_points: np.ndarray,
+    target_points: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    source = np.asarray(source_points, dtype=np.float32)
+    target = np.asarray(target_points, dtype=np.float32)
+    source_mean = source.mean(axis=0, keepdims=True)
+    target_mean = target.mean(axis=0, keepdims=True)
+    source_centered = source - source_mean
+    target_centered = target - target_mean
+    covariance = source_centered.T @ target_centered
+    u, _, vh = np.linalg.svd(covariance)
+    rotation = vh.T @ u.T
+    if np.linalg.det(rotation) < 0:
+        vh[-1, :] *= -1.0
+        rotation = vh.T @ u.T
+    translation = target_mean.reshape(3) - rotation @ source_mean.reshape(3)
+    return (
+        rotation.astype(np.float32, copy=False),
+        translation.astype(np.float32, copy=False),
+    )
+
+
 def transform_world_vertices_to_camera(
     *,
     vertices_world: np.ndarray,
@@ -528,6 +654,7 @@ def transform_world_vertices_to_camera(
     rotation = np.asarray(rotation, dtype=np.float32)
     translation = np.asarray(translation, dtype=np.float32).reshape(1, 3)
     return np.ascontiguousarray((rotation @ vertices_world.T).T + translation)
+
 
 def build_view_panel(items: list[tuple[str, np.ndarray]], *, footer: str) -> np.ndarray:
     tile_height, tile_width = items[0][1].shape[:2]

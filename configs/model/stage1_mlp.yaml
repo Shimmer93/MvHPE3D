@@ -1,5 +1,6 @@
 name: "stage1_mlp_fusion"
 input_dim: 249
+zero_mhr_root_input: true
 body_pose_dim: 69
 betas_dim: 10
 hidden_dim: 512
