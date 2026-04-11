@@ -15,6 +15,7 @@ class Stage1LossConfig:
 
     body_pose_weight: float = 1.0
     betas_weight: float = 1.0
+    supervise_betas: bool = True
 
 
 class Stage1Loss(nn.Module):
@@ -33,7 +34,10 @@ class Stage1Loss(nn.Module):
         target_betas: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         body_pose_loss = F.mse_loss(pred_body_pose, target_body_pose)
-        betas_loss = F.mse_loss(pred_betas, target_betas)
+        if self.config.supervise_betas:
+            betas_loss = F.mse_loss(pred_betas, target_betas)
+        else:
+            betas_loss = body_pose_loss.new_zeros(())
         total_loss = (
             self.config.body_pose_weight * body_pose_loss
             + self.config.betas_weight * betas_loss

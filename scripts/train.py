@@ -140,6 +140,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run a single Lightning fast-dev-run iteration",
     )
+    parser.add_argument(
+        "--disable-learn-betas",
+        action="store_true",
+        help="Disable the learned beta head and beta supervision",
+    )
     return parser.parse_args()
 
 
@@ -149,8 +154,8 @@ def main() -> None:
     validate_required_mhr_assets(args)
 
     data_config = build_data_config(experiment["data"], args)
-    model_config = build_model_config(experiment["model"])
-    loss_config = Stage1LossConfig(**experiment["loss"])
+    model_config = build_model_config(experiment["model"], args)
+    loss_config = build_loss_config(experiment["loss"], args)
     optimization_config = Stage1OptimizationConfig(**experiment["optimizer"])
 
     L.seed_everything(data_config.seed, workers=True)
@@ -199,11 +204,21 @@ def build_data_config(config: dict[str, Any], args: argparse.Namespace) -> Stage
     return Stage1DataConfig(**data_kwargs)
 
 
-def build_model_config(config: dict[str, Any]) -> Stage1MLPFusionConfig:
+def build_model_config(config: dict[str, Any], args: argparse.Namespace) -> Stage1MLPFusionConfig:
     model_kwargs = dict(config)
     model_kwargs.pop("name", None)
     model_kwargs.pop("_config_path", None)
+    if args.disable_learn_betas:
+        model_kwargs["learn_betas"] = False
     return Stage1MLPFusionConfig(**model_kwargs)
+
+
+def build_loss_config(config: dict[str, Any], args: argparse.Namespace) -> Stage1LossConfig:
+    loss_kwargs = dict(config)
+    if args.disable_learn_betas:
+        loss_kwargs["supervise_betas"] = False
+        loss_kwargs["betas_weight"] = 0.0
+    return Stage1LossConfig(**loss_kwargs)
 
 
 def build_trainer_config(

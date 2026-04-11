@@ -50,6 +50,9 @@ class Stage1FusionLightningModule(L.LightningModule):
             loss_config,
             Stage1LossConfig,
         )
+        if not self.model_config.learn_betas:
+            self.loss_config.supervise_betas = False
+            self.loss_config.betas_weight = 0.0
         self.optimization_config = _coerce_dataclass_config(
             optimization_config,
             Stage1OptimizationConfig,

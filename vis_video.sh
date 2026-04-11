@@ -7,4 +7,6 @@ uv run python scripts/visualize_video.py \
   --input-smpl-cache-dir /opt/data/humman_cropped/sam3dbody_fitted_smpl \
   --output-dir outputs/stage1_videos \
   --stage test \
-  --max-sequences 8
+  --max-sequences 8 \
+  --pred-camera-mode gt \
+  "$@"

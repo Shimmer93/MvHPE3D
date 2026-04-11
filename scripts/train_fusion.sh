@@ -32,6 +32,7 @@ Optional:
   --mhr-assets-dir PATH   Forwarded to scripts/train.py for test-time input conversion.
   --input-smpl-cache-dir PATH
                           Optional cache directory for fitted input-view SMPL parameters.
+  --disable-learn-betas   Forwarded to scripts/train.py. Disables learned beta prediction.
   --default-root-dir DIR  Output root for checkpoints and logs.
                           Default: outputs/stage1
   -h, --help              Show this help message.
@@ -58,6 +59,7 @@ Examples:
   bash scripts/train_fusion.sh \
     --manifest-path /opt/data/humman_cropped/humman_stage1_manifest.json \
     --gt-smpl-dir /opt/data/humman_cropped/smpl \
+    --disable-learn-betas \
     --test-after-train \
     --test-ckpt best
 EOF

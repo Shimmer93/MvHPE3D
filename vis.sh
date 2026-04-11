@@ -9,4 +9,6 @@ uv run python scripts/visualize.py \
     --input-smpl-cache-dir /opt/data/humman_cropped/sam3dbody_fitted_smpl \
     --stage test \
     --num-samples 8 \
-    --output-dir outputs/stage1_visualizations
+    --output-dir outputs/stage1_visualizations \
+    --pred-camera-mode gt \
+    "$@"

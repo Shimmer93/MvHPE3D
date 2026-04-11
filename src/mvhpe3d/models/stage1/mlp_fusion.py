@@ -16,6 +16,7 @@ class Stage1MLPFusionConfig:
 
     input_dim: int = 249
     zero_mhr_root_input: bool = False
+    learn_betas: bool = True
     body_pose_dim: int = 69
     betas_dim: int = 10
     hidden_dim: int = 256
@@ -32,7 +33,7 @@ class Stage1MLPFusionModel(nn.Module):
         super().__init__()
         self.config = config
 
-        output_dim = config.body_pose_dim + config.betas_dim
+        output_dim = config.body_pose_dim + (config.betas_dim if config.learn_betas else 0)
 
         self.view_encoder = MLP(
             input_dim=config.input_dim,
@@ -65,7 +66,14 @@ class Stage1MLPFusionModel(nn.Module):
 
         split_index = self.config.body_pose_dim
         pred_body_pose = fused_output[:, :split_index]
-        pred_betas = fused_output[:, split_index:]
+        if self.config.learn_betas:
+            pred_betas = fused_output[:, split_index:]
+        else:
+            pred_betas = torch.zeros(
+                (batch_size, self.config.betas_dim),
+                dtype=fused_output.dtype,
+                device=fused_output.device,
+            )
 
         return {
             "pred_body_pose": pred_body_pose,

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,13 @@ from typing import Any
 import cv2
 import numpy as np
 import torch
+import trimesh
 from torch.utils.data import DataLoader
+
+if "PYOPENGL_PLATFORM" not in os.environ:
+    os.environ["PYOPENGL_PLATFORM"] = "egl"
+
+import pyrender
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
@@ -29,8 +36,6 @@ from mvhpe3d.utils import (
 )
 from mvhpe3d.visualization import (
     load_camera_parameters,
-    overlay_mask_on_image,
-    render_projected_mesh_mask_camera,
     resolve_rgb_image_path,
 )
 
@@ -131,6 +136,13 @@ def parse_args() -> argparse.Namespace:
         default=0.55,
         help="Alpha used for semi-transparent mesh overlays",
     )
+    parser.add_argument(
+        "--pred-camera-mode",
+        type=str,
+        choices=("input", "gt"),
+        default="input",
+        help="Camera/root placement used for prediction overlays",
+    )
     parser.add_argument("--seed", type=int, default=None, help="Optional override for experiment seed")
     return parser.parse_args()
 
@@ -181,32 +193,38 @@ def main() -> None:
         batch_size=1,
     )
     faces = np.asarray(smpl_model.faces, dtype=np.int32)
+    overlay_renderer = CameraMeshOverlayRenderer()
 
     written = 0
     summaries = []
-    with torch.no_grad():
-        for batch in dataloader:
-            if written >= args.num_samples:
-                break
+    try:
+        with torch.no_grad():
+            for batch in dataloader:
+                if written >= args.num_samples:
+                    break
 
-            views_input = batch["views_input"].to(device)
-            predictions = module(views_input)
+                views_input = batch["views_input"].to(device)
+                predictions = module(views_input)
 
-            sample_summary = save_sample_outputs(
-                output_dir=output_dir,
-                sample_index=written,
-                batch=batch,
-                predictions=predictions,
-                smpl_model=smpl_model,
-                faces=faces,
-                device=device,
-                rgb_dir=rgb_dir,
-                cameras_dir=Path(data_config.cameras_dir).resolve(),
-                overlay_alpha=args.overlay_alpha,
-                module=module,
-            )
-            summaries.append(sample_summary)
-            written += 1
+                sample_summary = save_sample_outputs(
+                    output_dir=output_dir,
+                    sample_index=written,
+                    batch=batch,
+                    predictions=predictions,
+                    smpl_model=smpl_model,
+                    faces=faces,
+                    device=device,
+                    rgb_dir=rgb_dir,
+                    cameras_dir=Path(data_config.cameras_dir).resolve(),
+                    overlay_alpha=args.overlay_alpha,
+                    pred_camera_mode=args.pred_camera_mode,
+                    module=module,
+                    overlay_renderer=overlay_renderer,
+                )
+                summaries.append(sample_summary)
+                written += 1
+    finally:
+        overlay_renderer.close()
 
     summary_path = output_dir / "summary.json"
     summary_path.write_text(json.dumps({"samples": summaries}, indent=2), encoding="utf-8")
@@ -285,7 +303,9 @@ def save_sample_outputs(
     rgb_dir: Path,
     cameras_dir: Path,
     overlay_alpha: float,
+    pred_camera_mode: str,
     module: Stage1FusionLightningModule,
+    overlay_renderer: "CameraMeshOverlayRenderer",
 ) -> dict[str, Any]:
     meta = batch["meta"][0]
     sample_id = str(meta["sample_id"])
@@ -307,11 +327,11 @@ def save_sample_outputs(
         "frame_id": str(meta["frame_id"]),
         "camera_ids": [str(camera_id) for camera_id in meta["camera_ids"]],
         "placement_note": (
-            "Predicted fused meshes are canonical bodies placed in each input "
-            "view frame using the input-view fitted SMPL root pose directly, and projected "
-            "with per-view input intrinsics. GT meshes are built from HuMMan "
-            "world-frame SMPL and projected with HuMMan GT cameras."
+            "Predicted fused meshes are canonical bodies placed per view using "
+            f"{'the input-view fitted SMPL root pose and input intrinsics' if pred_camera_mode == 'input' else 'the HuMMan GT camera-frame root pose and GT intrinsics'}. "
+            "GT meshes are built from HuMMan world-frame SMPL and projected with HuMMan GT cameras."
         ),
+        "pred_camera_mode": pred_camera_mode,
         "body_pose_mse": float(np.mean((pred_body_pose - gt_body_pose) ** 2)),
         "betas_mse": float(np.mean((pred_betas - gt_betas) ** 2)),
         "body_pose_mae": float(np.mean(body_pose_abs_error)),
@@ -329,11 +349,21 @@ def save_sample_outputs(
     )
     pred_view_global_orient = pred_view_smpl["global_orient"].detach().cpu().numpy()
     pred_view_transl = pred_view_smpl["transl"].detach().cpu().numpy()
+    gt_camera_global_orient = batch["target_aux"]["camera_global_orient"][0].detach().cpu().numpy()
+    gt_camera_transl = batch["target_aux"]["camera_transl"][0].detach().cpu().numpy()
     gt_world_vertices, _ = build_smpl_outputs(
         smpl_model=smpl_model,
         device=device,
         body_pose=gt_body_pose,
         betas=gt_betas,
+        global_orient=gt_world_global_orient,
+        transl=gt_world_transl,
+    )
+    pred_world_vertices = build_smpl_vertices(
+        smpl_model=smpl_model,
+        device=device,
+        body_pose=pred_body_pose,
+        betas=pred_betas,
         global_orient=gt_world_global_orient,
         transl=gt_world_transl,
     )
@@ -356,11 +386,11 @@ def save_sample_outputs(
             camera_id=str(camera_id),
         )
         gt_cam_int = gt_camera.intrinsics
-        pred_vertices_camera, _ = build_smpl_outputs(
+        input_vertices_camera, input_joints_camera = build_smpl_outputs(
             smpl_model=smpl_model,
             device=device,
-            body_pose=pred_body_pose,
-            betas=pred_betas,
+            body_pose=pred_view_smpl["body_pose"][view_index].detach().cpu().numpy(),
+            betas=pred_view_smpl["betas"][view_index].detach().cpu().numpy(),
             global_orient=pred_view_global_orient[view_index],
             transl=pred_view_transl[view_index],
         )
@@ -369,82 +399,90 @@ def save_sample_outputs(
             rotation=gt_camera.rotation,
             translation=gt_camera.translation,
         )
+        if pred_camera_mode == "gt":
+            pred_vertices_camera = transform_world_vertices_to_camera(
+                vertices_world=pred_world_vertices,
+                rotation=gt_camera.rotation,
+                translation=gt_camera.translation,
+            )
+            pred_overlay_intrinsics = gt_cam_int
+            pred_translation_offset = np.zeros(3, dtype=np.float32)
+        else:
+            pred_vertices_oriented, pred_joints_oriented = build_smpl_outputs(
+                smpl_model=smpl_model,
+                device=device,
+                body_pose=pred_body_pose,
+                betas=pred_betas,
+                global_orient=pred_view_global_orient[view_index],
+                transl=np.zeros(3, dtype=np.float32),
+            )
+            pred_translation_offset = input_joints_camera[0] - pred_joints_oriented[0]
+            pred_vertices_camera = np.ascontiguousarray(
+                pred_vertices_oriented + pred_translation_offset.reshape(1, 3)
+            )
+            pred_overlay_intrinsics = pred_cam_int
         pred_view_vertices.append(pred_vertices_camera)
         gt_view_vertices.append(gt_vertices_camera)
 
-        pred_mask = render_projected_mesh_mask_camera(
-            image_bgr.shape[:2],
-            vertices_camera=pred_vertices_camera,
+        input_overlay, input_mask = overlay_renderer.render_overlay(
+            image_bgr=image_bgr,
+            vertices_camera=input_vertices_camera,
             faces=faces,
             intrinsics=pred_cam_int,
+            color_bgr=(60, 180, 245),
+            alpha=overlay_alpha,
         )
-        gt_mask = render_projected_mesh_mask_camera(
-            image_bgr.shape[:2],
+        pred_overlay, pred_mask = overlay_renderer.render_overlay(
+            image_bgr=image_bgr,
+            vertices_camera=pred_vertices_camera,
+            faces=faces,
+            intrinsics=pred_overlay_intrinsics,
+            color_bgr=(40, 70, 230),
+            alpha=overlay_alpha,
+        )
+        gt_overlay, gt_mask = overlay_renderer.render_overlay(
+            image_bgr=image_bgr,
             vertices_camera=gt_vertices_camera,
             faces=faces,
             intrinsics=gt_cam_int,
-        )
-
-        pred_overlay = overlay_mask_on_image(
-            image_bgr,
-            pred_mask,
-            color=(40, 70, 230),
+            color_bgr=(70, 210, 70),
             alpha=overlay_alpha,
         )
-        gt_overlay = overlay_mask_on_image(
-            image_bgr,
-            gt_mask,
-            color=(70, 210, 70),
-            alpha=overlay_alpha,
-        )
-        combined_overlay = overlay_mask_on_image(
-            overlay_mask_on_image(
-                image_bgr,
-                gt_mask,
-                color=(70, 210, 70),
-                alpha=overlay_alpha,
-            ),
-            pred_mask,
-            color=(40, 70, 230),
-            alpha=overlay_alpha,
-        )
-
         panel = build_view_panel(
             [
                 ("RGB", image_bgr),
+                ("Input Overlay", input_overlay),
                 ("Pred Overlay", pred_overlay),
                 ("GT Overlay", gt_overlay),
-                ("Combined", combined_overlay),
             ],
-            footer=f"{camera_id}  pred_px={int(pred_mask.sum() > 0)}  gt_px={int(gt_mask.sum() > 0)}",
+            footer="",
         )
         view_panels.append(panel)
         view_summaries.append(
             {
                 "camera_id": str(camera_id),
                 "image_path": str(image_path),
+                "input_visible": bool(input_mask.any()),
                 "pred_visible": bool(pred_mask.any()),
                 "gt_visible": bool(gt_mask.any()),
+                "input_mask_pixels": int(np.count_nonzero(input_mask)),
                 "pred_mask_pixels": int(np.count_nonzero(pred_mask)),
                 "gt_mask_pixels": int(np.count_nonzero(gt_mask)),
+                "pred_camera_mode": pred_camera_mode,
                 "pred_cam_int": pred_cam_int.astype(np.float32).tolist(),
                 "gt_cam_int": gt_cam_int.astype(np.float32).tolist(),
+                "pred_translation_offset": pred_translation_offset.astype(np.float32).tolist(),
                 "gt_vertices_source": "smpl_rebuild",
             }
         )
+        cv2.imwrite(str(sample_dir / f"{camera_id}_input_overlay.png"), input_overlay)
         cv2.imwrite(str(sample_dir / f"{camera_id}_pred_overlay.png"), pred_overlay)
         cv2.imwrite(str(sample_dir / f"{camera_id}_gt_overlay.png"), gt_overlay)
-        cv2.imwrite(str(sample_dir / f"{camera_id}_combined_overlay.png"), combined_overlay)
 
     summary_image = build_contact_sheet(
         title_lines=[
-            f"sample_id: {sample_id}",
-            f"sequence_id: {meta['sequence_id']}  frame_id: {meta['frame_id']}",
-            (
-            f"body_pose_mse={metrics['body_pose_mse']:.6f}  betas_mse={metrics['betas_mse']:.6f}  "
-                f"body_pose_mae={metrics['body_pose_mae']:.6f}  betas_mae={metrics['betas_mae']:.6f}"
-            ),
-            "Projection: pred uses input-view fitted root pose + input cam_int; GT uses HuMMan GT cameras.",
+            f"sequence_id: {meta['sequence_id']}",
+            f"pred_camera_mode: {pred_camera_mode}",
         ],
         view_panels=view_panels,
     )
@@ -458,6 +496,8 @@ def save_sample_outputs(
         gt_betas=gt_betas.astype(np.float32),
         pred_view_global_orient=pred_view_global_orient.astype(np.float32),
         pred_view_transl=pred_view_transl.astype(np.float32),
+        gt_camera_global_orient=gt_camera_global_orient.astype(np.float32),
+        gt_camera_transl=gt_camera_transl.astype(np.float32),
         gt_world_global_orient=gt_world_global_orient.astype(np.float32),
         gt_world_transl=gt_world_transl.astype(np.float32),
         pred_view_vertices=np.stack(pred_view_vertices, axis=0).astype(np.float32),
@@ -529,18 +569,138 @@ def transform_world_vertices_to_camera(
     translation = np.asarray(translation, dtype=np.float32).reshape(1, 3)
     return np.ascontiguousarray((rotation @ vertices_world.T).T + translation)
 
+
+class CameraMeshOverlayRenderer:
+    """Offscreen renderer for shaded camera-space mesh overlays."""
+
+    def __init__(self) -> None:
+        self._renderers: dict[tuple[int, int], pyrender.OffscreenRenderer] = {}
+
+    def close(self) -> None:
+        for renderer in self._renderers.values():
+            renderer.delete()
+        self._renderers.clear()
+
+    def render_overlay(
+        self,
+        *,
+        image_bgr: np.ndarray,
+        vertices_camera: np.ndarray,
+        faces: np.ndarray,
+        intrinsics: np.ndarray,
+        color_bgr: tuple[int, int, int],
+        alpha: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        height, width = image_bgr.shape[:2]
+        renderer = self._get_renderer(width=width, height=height)
+        mesh = trimesh.Trimesh(
+            np.asarray(vertices_camera, dtype=np.float32).copy(),
+            np.asarray(faces, dtype=np.int32),
+            process=False,
+        )
+        mesh.apply_transform(opencv_to_opengl_transform())
+        material = pyrender.MetallicRoughnessMaterial(
+            metallicFactor=0.1,
+            roughnessFactor=0.75,
+            baseColorFactor=bgr_to_rgba(color_bgr),
+            alphaMode="OPAQUE",
+        )
+        render_mesh = pyrender.Mesh.from_trimesh(mesh, material=material, smooth=True)
+
+        scene = pyrender.Scene(
+            bg_color=np.array([0, 0, 0, 0], dtype=np.uint8),
+            ambient_light=np.array([0.35, 0.35, 0.35], dtype=np.float32),
+        )
+        scene.add(render_mesh)
+        add_camera_lights(scene)
+        camera = pyrender.IntrinsicsCamera(
+            fx=float(intrinsics[0, 0]),
+            fy=float(intrinsics[1, 1]),
+            cx=float(intrinsics[0, 2]),
+            cy=float(intrinsics[1, 2]),
+        )
+        scene.add(camera, pose=np.eye(4, dtype=np.float32))
+
+        color_rgba, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+        return composite_rgba_on_image(image_bgr, color_rgba, alpha=alpha)
+
+    def _get_renderer(self, *, width: int, height: int) -> pyrender.OffscreenRenderer:
+        key = (width, height)
+        renderer = self._renderers.get(key)
+        if renderer is None:
+            renderer = pyrender.OffscreenRenderer(viewport_width=width, viewport_height=height)
+            self._renderers[key] = renderer
+        return renderer
+
+
+def opencv_to_opengl_transform() -> np.ndarray:
+    transform = np.eye(4, dtype=np.float32)
+    transform[1, 1] = -1.0
+    transform[2, 2] = -1.0
+    return transform
+
+
+def add_camera_lights(scene: pyrender.Scene) -> None:
+    light = pyrender.DirectionalLight(color=np.ones(3, dtype=np.float32), intensity=2.6)
+    light_poses = (
+        np.eye(4, dtype=np.float32),
+        np.asarray(
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 0.8660254, -0.5, 0.0],
+                [0.0, 0.5, 0.8660254, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        ),
+        np.asarray(
+            [
+                [0.8660254, 0.0, 0.5, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [-0.5, 0.0, 0.8660254, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        ),
+    )
+    for pose in light_poses:
+        scene.add(light, pose=pose)
+
+
+def composite_rgba_on_image(
+    image_bgr: np.ndarray,
+    color_rgba: np.ndarray,
+    *,
+    alpha: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    render_rgb = color_rgba[..., :3].astype(np.float32)
+    render_bgr = cv2.cvtColor(render_rgb, cv2.COLOR_RGB2BGR)
+    render_alpha = (color_rgba[..., 3].astype(np.float32) / 255.0) * float(alpha)
+    render_alpha = np.clip(render_alpha, 0.0, 1.0)
+    output = image_bgr.astype(np.float32).copy()
+    output *= 1.0 - render_alpha[..., None]
+    output += render_bgr * render_alpha[..., None]
+    return np.clip(output, 0.0, 255.0).astype(np.uint8), (render_alpha > 1e-4).astype(np.uint8)
+
+
+def bgr_to_rgba(color_bgr: tuple[int, int, int]) -> tuple[float, float, float, float]:
+    b, g, r = color_bgr
+    return (r / 255.0, g / 255.0, b / 255.0, 1.0)
+
 def build_view_panel(items: list[tuple[str, np.ndarray]], *, footer: str) -> np.ndarray:
     tile_height, tile_width = items[0][1].shape[:2]
     header_height = 34
-    footer_height = 28
+    footer_height = 28 if footer else 0
+    tile_gap = 12
+    panel_width = tile_width * len(items) + tile_gap * max(len(items) - 1, 0)
     panel = np.full(
-        (tile_height + header_height + footer_height, tile_width * len(items), 3),
+        (tile_height + header_height + footer_height, panel_width, 3),
         255,
         dtype=np.uint8,
     )
 
     for item_index, (title, image) in enumerate(items):
-        x0 = item_index * tile_width
+        x0 = item_index * (tile_width + tile_gap)
         panel[header_height : header_height + tile_height, x0 : x0 + tile_width] = image
         cv2.putText(
             panel,
@@ -549,20 +709,21 @@ def build_view_panel(items: list[tuple[str, np.ndarray]], *, footer: str) -> np.
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
             (20, 20, 20),
-            2,
+            1,
             cv2.LINE_AA,
         )
 
-    cv2.putText(
-        panel,
-        footer,
-        (12, header_height + tile_height + 20),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        (50, 50, 50),
-        2,
-        cv2.LINE_AA,
-    )
+    if footer:
+        cv2.putText(
+            panel,
+            footer,
+            (12, header_height + tile_height + 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (50, 50, 50),
+            1,
+            cv2.LINE_AA,
+        )
     return panel
 
 
@@ -585,7 +746,7 @@ def build_contact_sheet(*, title_lines: list[str], view_panels: list[np.ndarray]
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
             (20, 20, 20),
-            2,
+            1,
             cv2.LINE_AA,
         )
         y += text_height
