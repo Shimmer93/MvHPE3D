@@ -28,6 +28,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from mvhpe3d.data import Stage1DataConfig, Stage1HuMManDataModule, multiview_collate
 from mvhpe3d.lightning import Stage1FusionLightningModule
+from mvhpe3d.models import Stage1MLPFusionConfig, Stage1ResidualFusionConfig
 from mvhpe3d.utils import (
     build_smpl_model,
     load_experiment_config,
@@ -143,6 +144,26 @@ def parse_args() -> argparse.Namespace:
         default="input",
         help="Camera/root placement used for prediction overlays",
     )
+    parser.add_argument(
+        "--selection-mode",
+        type=str,
+        choices=("first", "best_improvement"),
+        default="first",
+        help="How to choose which samples to visualize",
+    )
+    parser.add_argument(
+        "--selection-metric",
+        type=str,
+        choices=("mpjpe", "pa_mpjpe"),
+        default="mpjpe",
+        help="Metric used when --selection-mode=best_improvement",
+    )
+    parser.add_argument(
+        "--min-improvement",
+        type=float,
+        default=None,
+        help="Optional minimum input-minus-pred improvement required for selection",
+    )
     parser.add_argument("--seed", type=int, default=None, help="Optional override for experiment seed")
     return parser.parse_args()
 
@@ -152,6 +173,10 @@ def main() -> None:
     experiment = load_experiment_config(args.config)
     validate_mhr_asset_folder(args.mhr_assets_dir or "/opt/data/assets")
     data_config = build_data_config(experiment["data"], args)
+    model_config = build_model_config(
+        experiment["model"],
+        checkpoint_path=args.checkpoint_path,
+    )
     data_config.batch_size = 1
     data_config.drop_last_train = False
 
@@ -161,19 +186,11 @@ def main() -> None:
     datamodule = Stage1HuMManDataModule(data_config)
     datamodule.setup(None)
     dataset = select_dataset(datamodule, args.stage)
-    dataloader = DataLoader(
-        dataset,
-        batch_size=1,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=False,
-        collate_fn=multiview_collate,
-    )
-
     device = resolve_device(args.device)
     module = Stage1FusionLightningModule.load_from_checkpoint(
         args.checkpoint_path,
         map_location="cpu",
+        model_config=model_config,
         mhr_assets_dir=args.mhr_assets_dir,
         smpl_model_path=args.smpl_model_path,
         input_smpl_cache_dir=resolve_input_smpl_cache_dir(args, data_config),
@@ -195,14 +212,22 @@ def main() -> None:
     faces = np.asarray(smpl_model.faces, dtype=np.int32)
     overlay_renderer = CameraMeshOverlayRenderer()
 
+    selected_entries = select_sample_entries(
+        dataset=dataset,
+        module=module,
+        device=device,
+        num_samples=args.num_samples,
+        selection_mode=args.selection_mode,
+        selection_metric=args.selection_metric,
+        min_improvement=args.min_improvement,
+    )
+
     written = 0
     summaries = []
     try:
         with torch.no_grad():
-            for batch in dataloader:
-                if written >= args.num_samples:
-                    break
-
+            for selected_entry in selected_entries:
+                batch = multiview_collate([dataset[selected_entry["dataset_index"]]])
                 views_input = batch["views_input"].to(device)
                 predictions = module(views_input)
 
@@ -221,6 +246,14 @@ def main() -> None:
                     module=module,
                     overlay_renderer=overlay_renderer,
                 )
+                sample_summary["selection"] = {
+                    "dataset_index": selected_entry["dataset_index"],
+                    "selection_mode": args.selection_mode,
+                    "selection_metric": args.selection_metric,
+                    "improvement": selected_entry["improvement"],
+                    "pred_metric": selected_entry["pred_metric"],
+                    "input_metric": selected_entry["input_metric"],
+                }
                 summaries.append(sample_summary)
                 written += 1
     finally:
@@ -251,6 +284,28 @@ def build_data_config(config: dict[str, Any], args: argparse.Namespace) -> Stage
         data_kwargs["seed"] = args.seed
 
     return Stage1DataConfig(**data_kwargs)
+
+
+def build_model_config(
+    config: dict[str, Any],
+    *,
+    checkpoint_path: str,
+) -> Stage1MLPFusionConfig | Stage1ResidualFusionConfig:
+    model_kwargs = dict(config)
+    model_name = str(model_kwargs.pop("name", "stage1_mlp_fusion"))
+    model_kwargs.pop("_config_path", None)
+    model_kwargs.update(load_checkpoint_model_overrides(checkpoint_path))
+    if model_name == "stage1_residual_fusion":
+        return Stage1ResidualFusionConfig(**model_kwargs)
+    return Stage1MLPFusionConfig(**model_kwargs)
+
+
+def load_checkpoint_model_overrides(checkpoint_path: str) -> dict[str, Any]:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    model_config = checkpoint.get("hyper_parameters", {}).get("model_config", {})
+    if not isinstance(model_config, dict):
+        return {}
+    return dict(model_config)
 
 
 def select_dataset(datamodule: Stage1HuMManDataModule, stage: str):
@@ -289,6 +344,85 @@ def resolve_input_smpl_cache_dir(args: argparse.Namespace, data_config: Stage1Da
         return str(Path(args.input_smpl_cache_dir).resolve())
     manifest_parent = Path(data_config.manifest_path).resolve().parent
     return str((manifest_parent / "sam3dbody_fitted_smpl").resolve())
+
+
+def select_sample_entries(
+    *,
+    dataset,
+    module: Stage1FusionLightningModule,
+    device: torch.device,
+    num_samples: int,
+    selection_mode: str,
+    selection_metric: str,
+    min_improvement: float | None,
+) -> list[dict[str, float | int]]:
+    if selection_mode == "first":
+        return [
+            {
+                "dataset_index": dataset_index,
+                "improvement": 0.0,
+                "pred_metric": 0.0,
+                "input_metric": 0.0,
+            }
+            for dataset_index in range(min(num_samples, len(dataset)))
+        ]
+
+    candidates = []
+    with torch.no_grad():
+        for dataset_index in range(len(dataset)):
+            batch = multiview_collate([dataset[dataset_index]])
+            score = compute_selection_score(
+                batch=batch,
+                module=module,
+                device=device,
+                metric_name=selection_metric,
+            )
+            if min_improvement is not None and score["improvement"] < min_improvement:
+                continue
+            candidates.append({"dataset_index": dataset_index, **score})
+
+    candidates.sort(key=lambda item: item["improvement"], reverse=True)
+    return candidates[:num_samples]
+
+
+def compute_selection_score(
+    *,
+    batch: dict[str, Any],
+    module: Stage1FusionLightningModule,
+    device: torch.device,
+    metric_name: str,
+) -> dict[str, float]:
+    views_input = batch["views_input"].to(device)
+    pred_cam_t = batch["view_aux"]["pred_cam_t"].to(device)
+    predictions = module(views_input)
+    input_view_smpl_params = module.convert_input_views_to_smpl(
+        views_input=views_input,
+        pred_cam_t=pred_cam_t,
+        batch_meta=batch["meta"],
+    )
+    pred_metrics = module._compute_test_joint_metrics(
+        pred_body_pose=predictions["pred_body_pose"],
+        pred_betas=predictions["pred_betas"],
+        target_body_pose=batch["target_body_pose"].to(device),
+        target_betas=batch["target_betas"].to(device),
+        target_aux={key: value.to(device) for key, value in batch["target_aux"].items()},
+        pred_cam_t=pred_cam_t,
+        input_view_smpl_params=input_view_smpl_params,
+    )
+    input_metrics = module._compute_input_view_joint_metrics(
+        input_view_smpl_params=input_view_smpl_params,
+        target_body_pose=batch["target_body_pose"].to(device),
+        target_betas=batch["target_betas"].to(device),
+        target_aux={key: value.to(device) for key, value in batch["target_aux"].items()},
+        pred_cam_t=pred_cam_t,
+    )
+    pred_value = float(pred_metrics[metric_name].detach().cpu().item())
+    input_value = float(input_metrics[metric_name].detach().cpu().item())
+    return {
+        "pred_metric": pred_value,
+        "input_metric": input_value,
+        "improvement": input_value - pred_value,
+    }
 
 
 def save_sample_outputs(

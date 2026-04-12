@@ -21,7 +21,10 @@ if str(SRC_ROOT) not in sys.path:
 from mvhpe3d.data import Stage1DataConfig, Stage1HuMManDataModule
 from mvhpe3d.lightning import Stage1FusionLightningModule, Stage1OptimizationConfig
 from mvhpe3d.losses import Stage1LossConfig
-from mvhpe3d.models import Stage1MLPFusionConfig
+from mvhpe3d.models import (
+    Stage1MLPFusionConfig,
+    Stage1ResidualFusionConfig,
+)
 from mvhpe3d.utils import load_experiment_config, validate_mhr_asset_folder
 
 
@@ -204,12 +207,20 @@ def build_data_config(config: dict[str, Any], args: argparse.Namespace) -> Stage
     return Stage1DataConfig(**data_kwargs)
 
 
-def build_model_config(config: dict[str, Any], args: argparse.Namespace) -> Stage1MLPFusionConfig:
+def build_model_config(
+    config: dict[str, Any],
+    args: argparse.Namespace,
+) -> (
+    Stage1MLPFusionConfig
+    | Stage1ResidualFusionConfig
+):
     model_kwargs = dict(config)
-    model_kwargs.pop("name", None)
+    model_name = str(model_kwargs.pop("name", "stage1_mlp_fusion"))
     model_kwargs.pop("_config_path", None)
     if args.disable_learn_betas:
         model_kwargs["learn_betas"] = False
+    if model_name == "stage1_residual_fusion":
+        return Stage1ResidualFusionConfig(**model_kwargs)
     return Stage1MLPFusionConfig(**model_kwargs)
 
 

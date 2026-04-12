@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import lightning as L
+import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
@@ -18,6 +19,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from mvhpe3d.data import Stage1DataConfig, Stage1HuMManDataModule
 from mvhpe3d.lightning import Stage1FusionLightningModule
+from mvhpe3d.models import Stage1MLPFusionConfig, Stage1ResidualFusionConfig
 from mvhpe3d.utils import load_experiment_config, validate_mhr_asset_folder
 
 
@@ -114,6 +116,10 @@ def main() -> None:
     args = parse_args()
     experiment = load_experiment_config(args.config)
     data_config = build_data_config(experiment["data"], args)
+    model_config = build_model_config(
+        experiment["model"],
+        checkpoint_path=args.checkpoint_path,
+    )
     trainer_config = build_eval_trainer_config(experiment["trainer"], args)
     validate_optional_mhr_assets(args)
 
@@ -126,6 +132,7 @@ def main() -> None:
     module = Stage1FusionLightningModule.load_from_checkpoint(
         args.checkpoint_path,
         map_location="cpu",
+        model_config=model_config,
         smpl_model_path=args.smpl_model_path,
         mhr_assets_dir=args.mhr_assets_dir,
         input_smpl_cache_dir=resolve_input_smpl_cache_dir(args, data_config),
@@ -171,6 +178,28 @@ def build_data_config(config: dict[str, Any], args: argparse.Namespace) -> Stage
         data_kwargs["seed"] = args.seed
 
     return Stage1DataConfig(**data_kwargs)
+
+
+def build_model_config(
+    config: dict[str, Any],
+    *,
+    checkpoint_path: str,
+) -> Stage1MLPFusionConfig | Stage1ResidualFusionConfig:
+    model_kwargs = dict(config)
+    model_name = str(model_kwargs.pop("name", "stage1_mlp_fusion"))
+    model_kwargs.pop("_config_path", None)
+    model_kwargs.update(load_checkpoint_model_overrides(checkpoint_path))
+    if model_name == "stage1_residual_fusion":
+        return Stage1ResidualFusionConfig(**model_kwargs)
+    return Stage1MLPFusionConfig(**model_kwargs)
+
+
+def load_checkpoint_model_overrides(checkpoint_path: str) -> dict[str, Any]:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    model_config = checkpoint.get("hyper_parameters", {}).get("model_config", {})
+    if not isinstance(model_config, dict):
+        return {}
+    return dict(model_config)
 
 
 def build_eval_trainer_config(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:

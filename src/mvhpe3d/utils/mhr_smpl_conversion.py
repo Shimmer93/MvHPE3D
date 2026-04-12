@@ -6,6 +6,7 @@ import hashlib
 import os
 import sys
 from pathlib import Path
+import warnings
 
 import numpy as np
 import torch
@@ -338,10 +339,15 @@ class MHRToSMPLConverter:
             dtype=torch.float32,
         )
 
-        smpl_model = smplx.SMPL(
-            model_path=str(self.smpl_model_path),
-            gender="neutral",
-        ).to(str(device))
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"You are using a SMPL model, with only 10 shape coefficients\.",
+            )
+            smpl_model = smplx.SMPL(
+                model_path=str(self.smpl_model_path),
+                gender="neutral",
+            ).to(str(device))
         smpl_template_mesh = trimesh.Trimesh(
             smpl_model.v_template.detach().cpu().numpy(),
             smpl_model.faces,

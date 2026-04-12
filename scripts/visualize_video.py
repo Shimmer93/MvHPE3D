@@ -28,6 +28,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from mvhpe3d.data import Stage1DataConfig, Stage1HuMManDataModule, multiview_collate
 from mvhpe3d.lightning import Stage1FusionLightningModule
+from mvhpe3d.models import Stage1MLPFusionConfig, Stage1ResidualFusionConfig
 from mvhpe3d.utils import (
     build_smpl_model,
     load_experiment_config,
@@ -173,6 +174,26 @@ def parse_args() -> argparse.Namespace:
         default="input",
         help="Camera/root placement used for prediction overlays",
     )
+    parser.add_argument(
+        "--selection-mode",
+        type=str,
+        choices=("first", "best_improvement"),
+        default="first",
+        help="How to choose which sequences to visualize",
+    )
+    parser.add_argument(
+        "--selection-metric",
+        type=str,
+        choices=("mpjpe", "pa_mpjpe"),
+        default="mpjpe",
+        help="Metric used when --selection-mode=best_improvement",
+    )
+    parser.add_argument(
+        "--min-improvement",
+        type=float,
+        default=None,
+        help="Optional minimum average input-minus-pred improvement required for selection",
+    )
     parser.add_argument("--seed", type=int, default=None, help="Optional override for experiment seed")
     return parser.parse_args()
 
@@ -188,6 +209,10 @@ def main() -> None:
     validate_mhr_asset_folder(args.mhr_assets_dir or "/opt/data/assets")
 
     data_config = build_data_config(experiment["data"], args)
+    model_config = build_model_config(
+        experiment["model"],
+        checkpoint_path=args.checkpoint_path,
+    )
     data_config.batch_size = 1
     data_config.drop_last_train = False
     if args.seed is not None:
@@ -201,6 +226,7 @@ def main() -> None:
     module = Stage1FusionLightningModule.load_from_checkpoint(
         args.checkpoint_path,
         map_location="cpu",
+        model_config=model_config,
         mhr_assets_dir=args.mhr_assets_dir,
         smpl_model_path=args.smpl_model_path,
         input_smpl_cache_dir=resolve_input_smpl_cache_dir(args, data_config),
@@ -232,8 +258,20 @@ def main() -> None:
                     f"sequence_id '{args.sequence_id}' was not found in the selected {args.stage} split"
                 )
             selected_sequence_ids = [args.sequence_id]
-        if args.max_sequences is not None:
-            selected_sequence_ids = selected_sequence_ids[: args.max_sequences]
+        else:
+            selected_sequence_ids = select_sequence_ids(
+                dataset=dataset,
+                grouped_indices=grouped_indices,
+                selected_sequence_ids=selected_sequence_ids,
+                module=module,
+                device=device,
+                selection_mode=args.selection_mode,
+                selection_metric=args.selection_metric,
+                min_improvement=args.min_improvement,
+                frame_step=args.frame_step,
+                max_frames=args.max_frames,
+                max_sequences=args.max_sequences,
+            )
 
         summaries = []
         for sequence_id in selected_sequence_ids:
@@ -328,6 +366,28 @@ def build_data_config(config: dict[str, Any], args: argparse.Namespace) -> Stage
     return Stage1DataConfig(**data_kwargs)
 
 
+def build_model_config(
+    config: dict[str, Any],
+    *,
+    checkpoint_path: str,
+) -> Stage1MLPFusionConfig | Stage1ResidualFusionConfig:
+    model_kwargs = dict(config)
+    model_name = str(model_kwargs.pop("name", "stage1_mlp_fusion"))
+    model_kwargs.pop("_config_path", None)
+    model_kwargs.update(load_checkpoint_model_overrides(checkpoint_path))
+    if model_name == "stage1_residual_fusion":
+        return Stage1ResidualFusionConfig(**model_kwargs)
+    return Stage1MLPFusionConfig(**model_kwargs)
+
+
+def load_checkpoint_model_overrides(checkpoint_path: str) -> dict[str, Any]:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    model_config = checkpoint.get("hyper_parameters", {}).get("model_config", {})
+    if not isinstance(model_config, dict):
+        return {}
+    return dict(model_config)
+
+
 def select_dataset(datamodule: Stage1HuMManDataModule, stage: str):
     if stage == "train":
         if datamodule.train_dataset is None:
@@ -373,6 +433,105 @@ def build_sequence_index(dataset) -> dict[str, list[int]]:
     return {
         sequence_id: [index for _, index in sorted(items)]
         for sequence_id, items in grouped.items()
+    }
+
+
+def select_sequence_ids(
+    *,
+    dataset,
+    grouped_indices: dict[str, list[int]],
+    selected_sequence_ids: list[str],
+    module: Stage1FusionLightningModule,
+    device: torch.device,
+    selection_mode: str,
+    selection_metric: str,
+    min_improvement: float | None,
+    frame_step: int,
+    max_frames: int | None,
+    max_sequences: int | None,
+) -> list[str]:
+    if selection_mode == "first":
+        if max_sequences is not None:
+            return selected_sequence_ids[:max_sequences]
+        return selected_sequence_ids
+
+    ranked_sequences = []
+    with torch.no_grad():
+        for sequence_id in selected_sequence_ids:
+            frame_indices = grouped_indices[sequence_id][::frame_step]
+            if max_frames is not None:
+                frame_indices = frame_indices[:max_frames]
+            if not frame_indices:
+                continue
+            improvements = []
+            pred_values = []
+            input_values = []
+            for dataset_index in frame_indices:
+                batch = multiview_collate([dataset[dataset_index]])
+                score = compute_selection_score(
+                    batch=batch,
+                    module=module,
+                    device=device,
+                    metric_name=selection_metric,
+                )
+                improvements.append(score["improvement"])
+                pred_values.append(score["pred_metric"])
+                input_values.append(score["input_metric"])
+            mean_improvement = float(np.mean(improvements))
+            if min_improvement is not None and mean_improvement < min_improvement:
+                continue
+            ranked_sequences.append(
+                {
+                    "sequence_id": sequence_id,
+                    "improvement": mean_improvement,
+                    "pred_metric": float(np.mean(pred_values)),
+                    "input_metric": float(np.mean(input_values)),
+                }
+            )
+
+    ranked_sequences.sort(key=lambda item: item["improvement"], reverse=True)
+    if max_sequences is not None:
+        ranked_sequences = ranked_sequences[:max_sequences]
+    return [item["sequence_id"] for item in ranked_sequences]
+
+
+def compute_selection_score(
+    *,
+    batch: dict[str, Any],
+    module: Stage1FusionLightningModule,
+    device: torch.device,
+    metric_name: str,
+) -> dict[str, float]:
+    views_input = batch["views_input"].to(device)
+    pred_cam_t = batch["view_aux"]["pred_cam_t"].to(device)
+    predictions = module(views_input)
+    input_view_smpl_params = module.convert_input_views_to_smpl(
+        views_input=views_input,
+        pred_cam_t=pred_cam_t,
+        batch_meta=batch["meta"],
+    )
+    pred_metrics = module._compute_test_joint_metrics(
+        pred_body_pose=predictions["pred_body_pose"],
+        pred_betas=predictions["pred_betas"],
+        target_body_pose=batch["target_body_pose"].to(device),
+        target_betas=batch["target_betas"].to(device),
+        target_aux={key: value.to(device) for key, value in batch["target_aux"].items()},
+        pred_cam_t=pred_cam_t,
+        input_view_smpl_params=input_view_smpl_params,
+    )
+    input_metrics = module._compute_input_view_joint_metrics(
+        input_view_smpl_params=input_view_smpl_params,
+        target_body_pose=batch["target_body_pose"].to(device),
+        target_betas=batch["target_betas"].to(device),
+        target_aux={key: value.to(device) for key, value in batch["target_aux"].items()},
+        pred_cam_t=pred_cam_t,
+    )
+    pred_value = float(pred_metrics[metric_name].detach().cpu().item())
+    input_value = float(input_metrics[metric_name].detach().cpu().item())
+    return {
+        "pred_metric": pred_value,
+        "input_metric": input_value,
+        "improvement": input_value - pred_value,
     }
 
 

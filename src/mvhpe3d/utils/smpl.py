@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import warnings
 
 import smplx
 import torch
@@ -37,8 +38,13 @@ def build_smpl_model(
 ):
     """Instantiate the neutral SMPL body model on the requested device."""
     resolved_path = resolve_smpl_model_path(smpl_model_path)
-    return smplx.SMPL(
-        model_path=str(resolved_path),
-        gender="neutral",
-        batch_size=batch_size,
-    ).to(device)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"You are using a SMPL model, with only 10 shape coefficients\.",
+        )
+        return smplx.SMPL(
+            model_path=str(resolved_path),
+            gender="neutral",
+            batch_size=batch_size,
+        ).to(device)

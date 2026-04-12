@@ -14,7 +14,12 @@ from mvhpe3d.metrics import (
     root_center_joints,
 )
 from mvhpe3d.losses import Stage1LossConfig, Stage1Loss
-from mvhpe3d.models import Stage1MLPFusionConfig, Stage1MLPFusionModel
+from mvhpe3d.models import (
+    Stage1MLPFusionConfig,
+    Stage1MLPFusionModel,
+    Stage1ResidualFusionConfig,
+    Stage1ResidualFusionModel,
+)
 from mvhpe3d.utils import MHRToSMPLConverter, build_smpl_model
 
 
@@ -26,6 +31,12 @@ class Stage1OptimizationConfig:
     weight_decay: float = 1e-4
 
 
+Stage1ModelConfig = (
+    Stage1MLPFusionConfig
+    | Stage1ResidualFusionConfig
+)
+
+
 class Stage1FusionLightningModule(L.LightningModule):
     """Lightning wrapper around the Stage 1 fusion baseline."""
 
@@ -34,7 +45,7 @@ class Stage1FusionLightningModule(L.LightningModule):
     def __init__(
         self,
         *,
-        model_config: Stage1MLPFusionConfig | None = None,
+        model_config: Stage1ModelConfig | dict | None = None,
         loss_config: Stage1LossConfig | None = None,
         optimization_config: Stage1OptimizationConfig | None = None,
         smpl_model_path: str | None = None,
@@ -42,10 +53,7 @@ class Stage1FusionLightningModule(L.LightningModule):
         input_smpl_cache_dir: str | None = None,
     ) -> None:
         super().__init__()
-        self.model_config = _coerce_dataclass_config(
-            model_config,
-            Stage1MLPFusionConfig,
-        )
+        self.model_config = _coerce_model_config(model_config)
         self.loss_config = _coerce_dataclass_config(
             loss_config,
             Stage1LossConfig,
@@ -61,7 +69,7 @@ class Stage1FusionLightningModule(L.LightningModule):
         self.mhr_assets_dir = mhr_assets_dir
         self.input_smpl_cache_dir = input_smpl_cache_dir
 
-        self.model = Stage1MLPFusionModel(self.model_config)
+        self.model = _build_stage1_model(self.model_config)
         self.criterion = Stage1Loss(self.loss_config)
         self._runtime_cache: dict[str, object | None] = {
             "smpl_eval_model": None,
@@ -481,3 +489,29 @@ def _coerce_dataclass_config(value, config_type):
     if isinstance(value, dict):
         return config_type(**value)
     raise TypeError(f"Expected {config_type.__name__}, dict, or None; got {type(value)!r}")
+
+
+def _coerce_model_config(value) -> Stage1ModelConfig:
+    if value is None:
+        return Stage1MLPFusionConfig()
+    if isinstance(
+        value,
+        (
+            Stage1MLPFusionConfig,
+            Stage1ResidualFusionConfig,
+        ),
+    ):
+        return value
+    if isinstance(value, dict):
+        model_kwargs = dict(value)
+        model_name = str(model_kwargs.pop("name", "stage1_mlp_fusion"))
+        if model_name == "stage1_residual_fusion":
+            return Stage1ResidualFusionConfig(**model_kwargs)
+        return Stage1MLPFusionConfig(**model_kwargs)
+    raise TypeError(f"Expected model config dataclass, dict, or None; got {type(value)!r}")
+
+
+def _build_stage1_model(config: Stage1ModelConfig):
+    if isinstance(config, Stage1ResidualFusionConfig):
+        return Stage1ResidualFusionModel(config)
+    return Stage1MLPFusionModel(config)
