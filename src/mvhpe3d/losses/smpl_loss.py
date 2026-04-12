@@ -15,6 +15,7 @@ class Stage1LossConfig:
 
     body_pose_weight: float = 1.0
     betas_weight: float = 1.0
+    joint_weight: float = 1.0
     supervise_betas: bool = True
 
 

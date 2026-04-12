@@ -164,6 +164,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional minimum input-minus-pred improvement required for selection",
     )
+    parser.add_argument(
+        "--smoothing-window",
+        type=int,
+        default=1,
+        help="Centered temporal smoothing window for predicted SMPL params; 1 disables smoothing",
+    )
     parser.add_argument("--seed", type=int, default=None, help="Optional override for experiment seed")
     return parser.parse_args()
 
@@ -171,6 +177,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     experiment = load_experiment_config(args.config)
+    if args.smoothing_window < 1:
+        raise ValueError(f"--smoothing-window must be >= 1, got {args.smoothing_window}")
     validate_mhr_asset_folder(args.mhr_assets_dir or "/opt/data/assets")
     data_config = build_data_config(experiment["data"], args)
     model_config = build_model_config(
@@ -211,6 +219,7 @@ def main() -> None:
     )
     faces = np.asarray(smpl_model.faces, dtype=np.int32)
     overlay_renderer = CameraMeshOverlayRenderer()
+    grouped_indices = build_sequence_index(dataset)
 
     selected_entries = select_sample_entries(
         dataset=dataset,
@@ -245,6 +254,10 @@ def main() -> None:
                     pred_camera_mode=args.pred_camera_mode,
                     module=module,
                     overlay_renderer=overlay_renderer,
+                    dataset=dataset,
+                    grouped_indices=grouped_indices,
+                    dataset_index=int(selected_entry["dataset_index"]),
+                    smoothing_window=args.smoothing_window,
                 )
                 sample_summary["selection"] = {
                     "dataset_index": selected_entry["dataset_index"],
@@ -346,6 +359,16 @@ def resolve_input_smpl_cache_dir(args: argparse.Namespace, data_config: Stage1Da
     return str((manifest_parent / "sam3dbody_fitted_smpl").resolve())
 
 
+def build_sequence_index(dataset) -> dict[str, list[int]]:
+    grouped: dict[str, list[tuple[int, int]]] = {}
+    for index, record in enumerate(dataset.records):
+        grouped.setdefault(record.sequence_id, []).append((int(record.frame_id), index))
+    return {
+        sequence_id: [index for _, index in sorted(items)]
+        for sequence_id, items in grouped.items()
+    }
+
+
 def select_sample_entries(
     *,
     dataset,
@@ -440,14 +463,26 @@ def save_sample_outputs(
     pred_camera_mode: str,
     module: Stage1FusionLightningModule,
     overlay_renderer: "CameraMeshOverlayRenderer",
+    dataset,
+    grouped_indices: dict[str, list[int]],
+    dataset_index: int,
+    smoothing_window: int,
 ) -> dict[str, Any]:
     meta = batch["meta"][0]
     sample_id = str(meta["sample_id"])
     sample_dir = output_dir / f"{sample_index:03d}_{sample_id}"
     sample_dir.mkdir(parents=True, exist_ok=True)
 
-    pred_body_pose = predictions["pred_body_pose"][0].detach().cpu().numpy()
-    pred_betas = predictions["pred_betas"][0].detach().cpu().numpy()
+    pred_body_pose, pred_betas = get_visualization_prediction(
+        batch=batch,
+        predictions=predictions,
+        module=module,
+        dataset=dataset,
+        grouped_indices=grouped_indices,
+        dataset_index=dataset_index,
+        device=device,
+        smoothing_window=smoothing_window,
+    )
     gt_body_pose = batch["target_body_pose"][0].detach().cpu().numpy()
     gt_betas = batch["target_betas"][0].detach().cpu().numpy()
     gt_world_global_orient = batch["target_aux"]["global_orient"][0].detach().cpu().numpy()
@@ -460,6 +495,7 @@ def save_sample_outputs(
         "sequence_id": str(meta["sequence_id"]),
         "frame_id": str(meta["frame_id"]),
         "camera_ids": [str(camera_id) for camera_id in meta["camera_ids"]],
+        "smoothing_window": smoothing_window,
         "placement_note": (
             "Predicted fused meshes are canonical bodies placed per view using "
             f"{'the input-view fitted SMPL root pose and input intrinsics' if pred_camera_mode == 'input' else 'the HuMMan GT camera-frame root pose and GT intrinsics'}. "
@@ -617,6 +653,7 @@ def save_sample_outputs(
         title_lines=[
             f"sequence_id: {meta['sequence_id']}",
             f"pred_camera_mode: {pred_camera_mode}",
+            f"smoothing_window: {smoothing_window}",
         ],
         view_panels=view_panels,
     )
@@ -640,6 +677,60 @@ def save_sample_outputs(
     metrics["views"] = view_summaries
     (sample_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     return metrics
+
+
+def get_visualization_prediction(
+    *,
+    batch: dict[str, Any],
+    predictions: dict[str, torch.Tensor],
+    module: Stage1FusionLightningModule,
+    dataset,
+    grouped_indices: dict[str, list[int]],
+    dataset_index: int,
+    device: torch.device,
+    smoothing_window: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    if smoothing_window <= 1:
+        return (
+            predictions["pred_body_pose"][0].detach().cpu().numpy(),
+            predictions["pred_betas"][0].detach().cpu().numpy(),
+        )
+
+    meta = batch["meta"][0]
+    sequence_indices = grouped_indices[str(meta["sequence_id"])]
+    center_position = sequence_indices.index(dataset_index)
+    smoothed_batches = select_centered_window_indices(
+        sequence_indices=sequence_indices,
+        center_position=center_position,
+        window_size=smoothing_window,
+    )
+
+    pred_body_pose_values = []
+    pred_betas_values = []
+    with torch.no_grad():
+        for neighbor_index in smoothed_batches:
+            neighbor_batch = multiview_collate([dataset[neighbor_index]])
+            neighbor_predictions = module(neighbor_batch["views_input"].to(device))
+            pred_body_pose_values.append(neighbor_predictions["pred_body_pose"][0].detach().cpu().numpy())
+            pred_betas_values.append(neighbor_predictions["pred_betas"][0].detach().cpu().numpy())
+
+    return (
+        np.mean(np.stack(pred_body_pose_values, axis=0), axis=0).astype(np.float32, copy=False),
+        np.mean(np.stack(pred_betas_values, axis=0), axis=0).astype(np.float32, copy=False),
+    )
+
+
+def select_centered_window_indices(
+    *,
+    sequence_indices: list[int],
+    center_position: int,
+    window_size: int,
+) -> list[int]:
+    half = window_size // 2
+    start = max(0, center_position - half)
+    end = min(len(sequence_indices), start + window_size)
+    start = max(0, end - window_size)
+    return sequence_indices[start:end]
 
 
 def build_smpl_vertices(

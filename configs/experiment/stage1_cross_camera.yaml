@@ -9,6 +9,7 @@ model:
 loss:
   body_pose_weight: 1.0
   betas_weight: 0.1
+  joint_weight: 1.0
 
 optimizer:
   learning_rate: 0.001

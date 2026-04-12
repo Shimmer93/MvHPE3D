@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 
 import lightning as L
 import torch
+import torch.nn.functional as F
 
 from mvhpe3d.metrics import (
     SMPL_EVAL_NUM_JOINTS,
@@ -146,10 +147,18 @@ class Stage1FusionLightningModule(L.LightningModule):
             target_body_pose=batch["target_body_pose"],
             target_betas=batch["target_betas"],
         )
+        joint_loss = self._compute_canonical_joint_loss(
+            pred_body_pose=predictions["pred_body_pose"],
+            pred_betas=predictions["pred_betas"],
+            target_body_pose=batch["target_body_pose"],
+            target_betas=batch["target_betas"],
+        )
+        total_loss = losses["loss"] + self.loss_config.joint_weight * joint_loss
         metrics = {
-            f"{stage}/loss": losses["loss"],
+            f"{stage}/loss": total_loss,
             f"{stage}/loss_body_pose": losses["loss_body_pose"],
             f"{stage}/loss_betas": losses["loss_betas"],
+            f"{stage}/loss_joints": joint_loss,
         }
         if stage == "val":
             joint_metrics = self._compute_canonical_joint_metrics(
@@ -199,6 +208,39 @@ class Stage1FusionLightningModule(L.LightningModule):
                 }
             )
         return metrics
+
+    def _compute_canonical_joint_loss(
+        self,
+        *,
+        pred_body_pose: torch.Tensor,
+        pred_betas: torch.Tensor,
+        target_body_pose: torch.Tensor,
+        target_betas: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size = pred_body_pose.shape[0]
+        zero_root = torch.zeros(
+            (batch_size, 3),
+            dtype=pred_body_pose.dtype,
+            device=pred_body_pose.device,
+        )
+        zero_transl = torch.zeros_like(zero_root)
+        pred_joints = root_center_joints(
+            self._build_smpl_joints(
+                body_pose=pred_body_pose,
+                betas=pred_betas,
+                global_orient=zero_root,
+                transl=zero_transl,
+            )
+        )
+        target_joints = root_center_joints(
+            self._build_smpl_joints(
+                body_pose=target_body_pose,
+                betas=target_betas,
+                global_orient=zero_root,
+                transl=zero_transl,
+            )
+        )
+        return F.mse_loss(pred_joints, target_joints)
 
     def _compute_canonical_joint_metrics(
         self,
