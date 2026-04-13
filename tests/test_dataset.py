@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from mvhpe3d.data import Stage1DataConfig, Stage1HuMManDataModule
@@ -143,3 +144,87 @@ def test_resolve_split_records_supports_random_partition(
     assert val_ids
     assert train_ids.isdisjoint(val_ids)
     assert train_ids | val_ids <= {"sample_0", "sample_1", "sample_2"}
+
+
+def test_resolve_split_records_random_partition_can_group_by_sequence(
+    tmp_path: Path,
+    sample_split_config: Path,
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    samples = [
+        {
+            "sample_id": "seq_a_frame_1",
+            "sequence_id": "seq_a",
+            "frame_id": "000001",
+            "views": [],
+        },
+        {
+            "sample_id": "seq_a_frame_2",
+            "sequence_id": "seq_a",
+            "frame_id": "000002",
+            "views": [],
+        },
+        {
+            "sample_id": "seq_b_frame_1",
+            "sequence_id": "seq_b",
+            "frame_id": "000001",
+            "views": [],
+        },
+        {
+            "sample_id": "seq_b_frame_2",
+            "sequence_id": "seq_b",
+            "frame_id": "000002",
+            "views": [],
+        },
+    ]
+    manifest_path.write_text(json.dumps({"samples": samples}), encoding="utf-8")
+
+    split_config_path = tmp_path / "splits.yaml"
+    split_config_path.write_text(
+        """
+random_by_sequence:
+  ratio: 0.5
+  random_seed: 0
+  partition_by: sequence_id
+  candidate_dataset:
+    split: null
+    cameras: null
+    subjects: null
+    actions: null
+  train_dataset:
+    split: null
+    cameras: null
+    subjects: null
+    actions: null
+  val_dataset:
+    split: null
+    cameras: null
+    subjects: null
+    actions: null
+  test_dataset:
+    split: null
+    cameras: null
+    subjects: null
+    actions: null
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    records = load_sample_records(manifest_path)
+    split_records = resolve_split_records(
+        records,
+        split_config_path=str(split_config_path),
+        split_name="random_by_sequence",
+        num_views=0,
+    )
+
+    train_sequences = {record.sequence_id for record in split_records["train"]}
+    val_sequences = {record.sequence_id for record in split_records["val"]}
+
+    assert train_sequences
+    assert val_sequences
+    assert train_sequences.isdisjoint(val_sequences)
+    for sequence_id in ("seq_a", "seq_b"):
+        train_count = sum(record.sequence_id == sequence_id for record in split_records["train"])
+        val_count = sum(record.sequence_id == sequence_id for record in split_records["val"])
+        assert (train_count == 0) != (val_count == 0)

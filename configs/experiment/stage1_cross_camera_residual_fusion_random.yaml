@@ -1,0 +1,19 @@
+name: "stage1_cross_camera_residual_fusion_random"
+
+data:
+  config: "configs/data/humman_stage1_random.yaml"
+
+model:
+  config: "configs/model/stage1_residual_fusion.yaml"
+
+loss:
+  body_pose_weight: 1.0
+  betas_weight: 0.1
+  joint_weight: 1.0
+
+optimizer:
+  learning_rate: 0.001
+  weight_decay: 0.00001
+
+trainer:
+  config: "configs/trainer/default.yaml"

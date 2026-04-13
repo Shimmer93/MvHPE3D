@@ -40,6 +40,32 @@ from mvhpe3d.visualization import (
     resolve_rgb_image_path,
 )
 
+SMPL_SKELETON_EDGES = (
+    (0, 1),
+    (0, 2),
+    (0, 3),
+    (1, 4),
+    (2, 5),
+    (3, 6),
+    (4, 7),
+    (5, 8),
+    (6, 9),
+    (7, 10),
+    (8, 11),
+    (9, 12),
+    (12, 13),
+    (12, 14),
+    (12, 15),
+    (13, 16),
+    (14, 17),
+    (16, 18),
+    (17, 19),
+    (18, 20),
+    (19, 21),
+    (20, 22),
+    (21, 23),
+)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -539,7 +565,89 @@ def save_sample_outputs(
     )
     pred_view_vertices = []
     gt_view_vertices = []
+    reference_image_path = resolve_rgb_image_path(
+        rgb_dir,
+        sequence_id=str(meta["sequence_id"]),
+        camera_id=str(meta["camera_ids"][0]),
+        frame_id=str(meta["frame_id"]),
+    )
+    reference_image = cv2.imread(str(reference_image_path), cv2.IMREAD_COLOR)
+    if reference_image is None:
+        raise FileNotFoundError(f"Failed to read RGB image: {reference_image_path}")
+    fixed_view_height, fixed_view_width = reference_image.shape[:2]
+    input_fixed_view_colors = (
+        (30, 145, 220),
+        (70, 170, 235),
+        (20, 125, 195),
+        (95, 190, 245),
+    )
+    fixed_view_meshes: list[tuple[str, np.ndarray, np.ndarray, tuple[int, int, int]]] = []
     for view_index, camera_id in enumerate(meta["camera_ids"]):
+        canonical_input_vertices, canonical_input_joints = build_smpl_outputs(
+            smpl_model=smpl_model,
+            device=device,
+            body_pose=pred_view_smpl["body_pose"][view_index].detach().cpu().numpy(),
+            betas=pred_view_smpl["betas"][view_index].detach().cpu().numpy(),
+            global_orient=np.zeros(3, dtype=np.float32),
+            transl=np.zeros(3, dtype=np.float32),
+        )
+        fixed_view_meshes.append(
+            (
+                f"View {view_index + 1} Input",
+                canonical_input_vertices,
+                canonical_input_joints,
+                input_fixed_view_colors[view_index % len(input_fixed_view_colors)],
+            )
+        )
+    canonical_pred_vertices, canonical_pred_joints = build_smpl_outputs(
+        smpl_model=smpl_model,
+        device=device,
+        body_pose=pred_body_pose,
+        betas=pred_betas,
+        global_orient=np.zeros(3, dtype=np.float32),
+        transl=np.zeros(3, dtype=np.float32),
+    )
+    canonical_gt_vertices, canonical_gt_joints = build_smpl_outputs(
+        smpl_model=smpl_model,
+        device=device,
+        body_pose=gt_body_pose,
+        betas=gt_betas,
+        global_orient=np.zeros(3, dtype=np.float32),
+        transl=np.zeros(3, dtype=np.float32),
+    )
+    fixed_view_meshes.extend(
+        [
+            ("Unified Prediction", canonical_pred_vertices, canonical_pred_joints, (55, 85, 235)),
+            ("Unified GT", canonical_gt_vertices, canonical_gt_joints, (85, 200, 95)),
+        ]
+    )
+    fixed_view_scene = build_fixed_view_scene(
+        [vertices for _, vertices, _, _ in fixed_view_meshes],
+        width=fixed_view_width,
+        height=fixed_view_height,
+    )
+    fixed_view_panel = build_view_panel(
+        [
+            (
+                title,
+                overlay_renderer.render_fixed_view(
+                    vertices=vertices,
+                    joints=joints,
+                    faces=faces,
+                    color_bgr=color_bgr,
+                    width=fixed_view_width,
+                    height=fixed_view_height,
+                    scene_spec=fixed_view_scene,
+                ),
+            )
+            for title, vertices, joints, color_bgr in fixed_view_meshes
+        ],
+        footer="",
+    )
+    cv2.imwrite(str(sample_dir / "fixed_view_meshes.png"), fixed_view_panel)
+    view_panels.append(fixed_view_panel)
+    for view_index, camera_id in enumerate(meta["camera_ids"]):
+        input_color_bgr = input_fixed_view_colors[view_index % len(input_fixed_view_colors)]
         image_path = resolve_rgb_image_path(
             rgb_dir,
             sequence_id=str(meta["sequence_id"]),
@@ -599,7 +707,7 @@ def save_sample_outputs(
             vertices_camera=input_vertices_camera,
             faces=faces,
             intrinsics=pred_cam_int,
-            color_bgr=(60, 180, 245),
+            color_bgr=input_color_bgr,
             alpha=overlay_alpha,
         )
         pred_overlay, pred_mask = overlay_renderer.render_overlay(
@@ -620,10 +728,10 @@ def save_sample_outputs(
         )
         panel = build_view_panel(
             [
-                ("RGB", image_bgr),
-                ("Input Overlay", input_overlay),
-                ("Pred Overlay", pred_overlay),
-                ("GT Overlay", gt_overlay),
+                (f"View {view_index + 1} RGB", image_bgr),
+                (f"View {view_index + 1} Input", input_overlay),
+                ("Unified Prediction", pred_overlay),
+                ("Unified GT", gt_overlay),
             ],
             footer="",
         )
@@ -803,7 +911,10 @@ class CameraMeshOverlayRenderer:
 
     def close(self) -> None:
         for renderer in self._renderers.values():
-            renderer.delete()
+            try:
+                renderer.delete()
+            except Exception:
+                pass
         self._renderers.clear()
 
     def render_overlay(
@@ -849,6 +960,60 @@ class CameraMeshOverlayRenderer:
         color_rgba, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
         return composite_rgba_on_image(image_bgr, color_rgba, alpha=alpha)
 
+    def render_fixed_view(
+        self,
+        *,
+        vertices: np.ndarray,
+        joints: np.ndarray,
+        faces: np.ndarray,
+        color_bgr: tuple[int, int, int],
+        width: int = 320,
+        height: int = 320,
+        scene_spec: dict[str, np.ndarray | float] | None = None,
+    ) -> np.ndarray:
+        renderer = self._get_renderer(width=width, height=height)
+        posed_vertices, posed_joints, intrinsics = prepare_fixed_view_geometry(
+            vertices=vertices,
+            joints=joints,
+            width=width,
+            height=height,
+            scene_spec=scene_spec,
+        )
+        mesh = trimesh.Trimesh(
+            np.asarray(posed_vertices, dtype=np.float32).copy(),
+            np.asarray(faces, dtype=np.int32),
+            process=False,
+        )
+        material = pyrender.MetallicRoughnessMaterial(
+            metallicFactor=0.1,
+            roughnessFactor=0.75,
+            baseColorFactor=bgr_to_rgba(color_bgr),
+            alphaMode="OPAQUE",
+        )
+        render_mesh = pyrender.Mesh.from_trimesh(mesh, material=material, smooth=True)
+        scene = pyrender.Scene(
+            bg_color=np.array([255, 255, 255, 255], dtype=np.uint8),
+            ambient_light=np.array([0.45, 0.45, 0.45], dtype=np.float32),
+        )
+        scene.add(render_mesh)
+        add_camera_lights(scene)
+        camera = pyrender.IntrinsicsCamera(
+            fx=float(intrinsics[0, 0]),
+            fy=float(intrinsics[1, 1]),
+            cx=float(intrinsics[0, 2]),
+            cy=float(intrinsics[1, 2]),
+        )
+        scene.add(camera, pose=np.eye(4, dtype=np.float32))
+        color_rgba, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+        color_rgb = color_rgba[..., :3].astype(np.uint8)
+        color_bgr_image = cv2.cvtColor(color_rgb, cv2.COLOR_RGB2BGR)
+        return draw_projected_skeleton(
+            image_bgr=color_bgr_image,
+            joints_camera=posed_joints,
+            intrinsics=intrinsics,
+            color_bgr=blend_color(color_bgr, target=(255, 255, 255), weight=0.35),
+        )
+
     def _get_renderer(self, *, width: int, height: int) -> pyrender.OffscreenRenderer:
         key = (width, height)
         renderer = self._renderers.get(key)
@@ -892,6 +1057,145 @@ def add_camera_lights(scene: pyrender.Scene) -> None:
         scene.add(light, pose=pose)
 
 
+def prepare_fixed_view_geometry(
+    *,
+    vertices: np.ndarray,
+    joints: np.ndarray,
+    width: int,
+    height: int,
+    scene_spec: dict[str, np.ndarray | float] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    vertices = np.asarray(vertices, dtype=np.float32)
+    joints = np.asarray(joints, dtype=np.float32)
+    if scene_spec is None:
+        scene_spec = build_fixed_view_scene([vertices], width=width, height=height)
+    center = np.asarray(scene_spec["center"], dtype=np.float32)
+    rotation = np.asarray(scene_spec["rotation"], dtype=np.float32)
+    intrinsics = np.asarray(scene_spec["intrinsics"], dtype=np.float32)
+    depth = float(scene_spec["depth"])
+    centered_vertices = vertices - center.reshape(1, 3)
+    centered_joints = joints - center.reshape(1, 3)
+    rotated_vertices = (rotation @ centered_vertices.T).T
+    rotated_joints = (rotation @ centered_joints.T).T
+    translated_vertices = rotated_vertices + np.array([0.0, 0.0, -depth], dtype=np.float32)
+    translated_joints = rotated_joints + np.array([0.0, 0.0, -depth], dtype=np.float32)
+    return translated_vertices, translated_joints, intrinsics
+
+
+def build_fixed_view_scene(
+    vertices_list: list[np.ndarray],
+    *,
+    width: int,
+    height: int,
+) -> dict[str, np.ndarray | float]:
+    stacked_vertices = np.concatenate(
+        [np.asarray(vertices, dtype=np.float32) for vertices in vertices_list],
+        axis=0,
+    )
+    center = 0.5 * (np.min(stacked_vertices, axis=0) + np.max(stacked_vertices, axis=0))
+    rotation = fixed_view_rotation_matrix()
+    centered_vertices = stacked_vertices - center.reshape(1, 3)
+    rotated_vertices = (rotation @ centered_vertices.T).T
+    extent = np.max(rotated_vertices, axis=0) - np.min(rotated_vertices, axis=0)
+    scale = max(float(np.max(extent)), 1e-3)
+    depth = 1.75 * scale
+    focal = 1.34 * min(width, height)
+    intrinsics = np.array(
+        [
+            [focal, 0.0, width / 2.0],
+            [0.0, focal, height / 2.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    return {
+        "center": center.astype(np.float32, copy=False),
+        "rotation": rotation,
+        "depth": depth,
+        "intrinsics": intrinsics,
+    }
+
+
+def fixed_view_rotation_matrix() -> np.ndarray:
+    yaw = np.deg2rad(-28.0)
+    pitch = np.deg2rad(12.0)
+    cos_yaw, sin_yaw = np.cos(yaw), np.sin(yaw)
+    cos_pitch, sin_pitch = np.cos(pitch), np.sin(pitch)
+    rotation_y = np.array(
+        [
+            [cos_yaw, 0.0, sin_yaw],
+            [0.0, 1.0, 0.0],
+            [-sin_yaw, 0.0, cos_yaw],
+        ],
+        dtype=np.float32,
+    )
+    rotation_x = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, cos_pitch, -sin_pitch],
+            [0.0, sin_pitch, cos_pitch],
+        ],
+        dtype=np.float32,
+    )
+    return rotation_x @ rotation_y
+
+
+def draw_projected_skeleton(
+    *,
+    image_bgr: np.ndarray,
+    joints_camera: np.ndarray,
+    intrinsics: np.ndarray,
+    color_bgr: tuple[int, int, int],
+) -> np.ndarray:
+    output = image_bgr.copy()
+    projected = project_points_to_image(joints_camera=joints_camera, intrinsics=intrinsics)
+    for joint_start, joint_end in SMPL_SKELETON_EDGES:
+        start = projected[joint_start]
+        end = projected[joint_end]
+        if start is None or end is None:
+            continue
+        cv2.line(output, start, end, color_bgr, 2, cv2.LINE_AA)
+    for point in projected:
+        if point is None:
+            continue
+        cv2.circle(output, point, 3, (255, 255, 255), -1, cv2.LINE_AA)
+        cv2.circle(output, point, 2, color_bgr, -1, cv2.LINE_AA)
+    return output
+
+
+def project_points_to_image(
+    *,
+    joints_camera: np.ndarray,
+    intrinsics: np.ndarray,
+) -> list[tuple[int, int] | None]:
+    joints_camera = np.asarray(joints_camera, dtype=np.float32)[:24]
+    intrinsics = np.asarray(intrinsics, dtype=np.float32)
+    projected: list[tuple[int, int] | None] = []
+    for joint in joints_camera:
+        depth = float(-joint[2])
+        if depth <= 1e-4:
+            projected.append(None)
+            continue
+        x = float(joint[0] / -joint[2])
+        y = float(joint[1] / -joint[2])
+        pixel_x = intrinsics[0, 0] * x + intrinsics[0, 2]
+        pixel_y = intrinsics[1, 2] - intrinsics[1, 1] * y
+        projected.append((int(round(pixel_x)), int(round(pixel_y))))
+    return projected
+
+
+def blend_color(
+    color_bgr: tuple[int, int, int],
+    *,
+    target: tuple[int, int, int],
+    weight: float,
+) -> tuple[int, int, int]:
+    source = np.asarray(color_bgr, dtype=np.float32)
+    target_array = np.asarray(target, dtype=np.float32)
+    blended = source * (1.0 - weight) + target_array * weight
+    return tuple(int(round(value)) for value in blended.tolist())
+
+
 def composite_rgba_on_image(
     image_bgr: np.ndarray,
     color_rgba: np.ndarray,
@@ -927,6 +1231,14 @@ def build_view_panel(items: list[tuple[str, np.ndarray]], *, footer: str) -> np.
     for item_index, (title, image) in enumerate(items):
         x0 = item_index * (tile_width + tile_gap)
         panel[header_height : header_height + tile_height, x0 : x0 + tile_width] = image
+        cv2.rectangle(
+            panel,
+            (x0, header_height),
+            (x0 + tile_width - 1, header_height + tile_height - 1),
+            (190, 190, 190),
+            1,
+            cv2.LINE_AA,
+        )
         cv2.putText(
             panel,
             title,

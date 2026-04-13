@@ -213,7 +213,7 @@ projected with the saved per-view `cam_int`.
 
 **Sampling protocols**:
 - `cross_camera_split` (main): train on `{kinect_000, 002, 003, 004, 005, 006, 008, iphone}`, val on `{kinect_001, 007, 009}`
-- `random_split` (secondary sanity check): random 80/20 train/val split across all cameras
+- `random_split` (secondary sanity check): random 80/20 train/val split by `sequence_id` across all cameras
 
 **Stage 1 (Current)**: Simple MLP-based baseline
 - Per-view encoder: MLP over concatenated single-view features

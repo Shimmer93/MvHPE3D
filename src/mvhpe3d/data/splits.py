@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+from collections import defaultdict
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -173,6 +174,7 @@ def resolve_split_records(
             candidate_records,
             train_ratio=float(policy["ratio"]),
             seed=int(policy.get("random_seed", 0)),
+            partition_by=_normalize_optional_string(policy.get("partition_by")) or "sample_id",
         )
         return {
             "train": filter_records_by_selector(
@@ -245,20 +247,38 @@ def filter_records_by_selector(
 
 
 def _partition_records(
-    records: list[SampleRecord], *, train_ratio: float, seed: int
+    records: list[SampleRecord], *, train_ratio: float, seed: int, partition_by: str
 ) -> dict[str, list[SampleRecord]]:
     if not 0.0 < train_ratio < 1.0:
         raise ValueError(f"ratio must be between 0 and 1, got {train_ratio}")
+    if partition_by not in {"sample_id", "sequence_id", "subject_id", "action_id"}:
+        raise ValueError(
+            "partition_by must be one of "
+            "{'sample_id', 'sequence_id', 'subject_id', 'action_id'}, "
+            f"got {partition_by!r}"
+        )
 
-    shuffled_records = sorted(
+    sorted_records = sorted(
         records,
         key=lambda record: (record.sample_id, record.sequence_id, record.frame_id),
     )
-    random.Random(seed).shuffle(shuffled_records)
+    grouped_records: dict[str, list[SampleRecord]] = defaultdict(list)
+    for record in sorted_records:
+        group_key = getattr(record, partition_by)
+        normalized_group_key = group_key if group_key is not None else "<none>"
+        grouped_records[str(normalized_group_key)].append(record)
 
-    train_count = int(len(shuffled_records) * train_ratio)
-    train_records = shuffled_records[:train_count]
-    val_records = shuffled_records[train_count:]
+    shuffled_group_keys = sorted(grouped_records)
+    random.Random(seed).shuffle(shuffled_group_keys)
+
+    train_group_count = int(len(shuffled_group_keys) * train_ratio)
+    train_group_keys = set(shuffled_group_keys[:train_group_count])
+
+    train_records: list[SampleRecord] = []
+    val_records: list[SampleRecord] = []
+    for group_key in shuffled_group_keys:
+        destination = train_records if group_key in train_group_keys else val_records
+        destination.extend(grouped_records[group_key])
 
     return {
         "train": train_records,

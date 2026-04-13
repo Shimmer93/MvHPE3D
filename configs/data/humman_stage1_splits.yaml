@@ -18,6 +18,7 @@ cross_camera_split:
 random_split:
   ratio: 0.8
   random_seed: 0
+  partition_by: sequence_id
   candidate_dataset:
     split: null
     cameras: null
