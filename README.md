@@ -58,12 +58,17 @@ reproducible repository state rather than an untracked local script.
 - `mhr_model_params`
 - `shape_params`
 
+**Stage 2 model input per view**:
+- cached fitted SMPL `body_pose`
+- cached fitted SMPL `betas`
+- internally converted to canonical `body_pose_6d + betas` for fusion/refinement
+
 **Available auxiliary per-view fields**:
 - `pred_cam_t`
 - `cam_int`
 - `image_size`
 
-**Output**: A fused canonical SMPL estimate that leverages multi-view consistency. In Stage 1, the prediction target is the canonical body (`smpl_betas`, `smpl_body_pose`) with root translation centered at the pelvis and root rotation removed.
+**Output**: A fused canonical SMPL estimate that leverages multi-view consistency. In both Stage 1 and Stage 2, the prediction target is the canonical body (`smpl_betas`, `smpl_body_pose`) with root translation centered at the pelvis and root rotation removed.
 
 **Canonical target space**: pelvis-centered, SMPL root rotation-removed canonical space. The fused supervision target is defined in this body-centered coordinate system rather than an external world frame.
 
@@ -96,6 +101,18 @@ uv run python scripts/build_humman_stage1_manifest.py \
 This keeps only valid single-person exports and groups them by
 `sequence_id + frame_id`. Training supervision now always comes from the
 HuMMan GT SMPL sequence files in `smpl/`, not from any exported prediction file.
+
+4. Precompute cached fitted SMPL parameters for each exported view if you want
+   to train or evaluate Stage 2:
+
+```bash
+uv run python scripts/precompute_input_smpl.py \
+  --manifest-path /opt/data/humman_cropped/humman_stage1_manifest.json \
+  --cache-dir /opt/data/humman_cropped/sam3dbody_fitted_smpl
+```
+
+This creates one cached fitted-SMPL file per source SAM3DBody prediction. Stage
+2 uses these cached per-view fits as its primary model input representation.
 
 **Assumption**: Single person per sequence. No cross-view person association is needed.
 
@@ -147,11 +164,27 @@ bash scripts/train_fusion.sh \
 The default split policy file is `configs/data/humman_stage1_splits.yaml`. It
 contains named policies such as `cross_camera_split` and `random_split`.
 
+Run the Stage 2 parameter-space fusion/refinement model with:
+
+```bash
+uv run python scripts/train.py \
+  --config configs/experiment/stage2_cross_camera.yaml \
+  --manifest-path /path/to/humman_stage1_manifest.json \
+  --input-smpl-cache-dir /path/to/sam3dbody_fitted_smpl
+```
+
+Stage 2 still requires the manifest because it defines sample grouping, split
+resolution, per-view source `.npz` paths, and default GT/camera lookup roots.
+The fitted-SMPL cache replaces the Stage 1 compact per-view model input, not
+the manifest itself.
+
 Important:
 - exported SAM3DBody `.npz` files must include `mhr_model_params` and `shape_params`
 - supervision still comes from HuMMan GT SMPL under `smpl/`
 - validation/test-time camera-frame metrics require the MHR conversion assets
   (default lookup: `/opt/data/assets`)
+- Stage 2 training requires a precomputed fitted-SMPL cache directory such as
+  `$(dirname manifest)/sam3dbody_fitted_smpl`
 
 For multi-GPU training, forward Lightning trainer overrides from the CLI:
 
@@ -215,7 +248,7 @@ projected with the saved per-view `cam_int`.
 - `cross_camera_split` (main): train on `{kinect_000, 002, 003, 004, 005, 006, 008, iphone}`, val on `{kinect_001, 007, 009}`
 - `random_split` (secondary sanity check): random 80/20 train/val split by `sequence_id` across all cameras
 
-**Stage 1 (Current)**: Simple MLP-based baseline
+**Stage 1**: Direct fusion from compact SAM3DBody parameters
 - Per-view encoder: MLP over concatenated single-view features
 - Fusion: permutation-invariant pooling across views (DeepSets-style)
 - Decoder: MLP that predicts fused canonical SMPL parameters
@@ -226,9 +259,18 @@ projected with the saved per-view `cam_int`.
 - Supervision: GT SMPL parameters transformed to the pelvis-centered, root rotation-removed canonical space
 - `pred_cam_t` and `cam_int` are excluded from Stage 1 model input and kept only as auxiliary fields
 
-**Stage 2 (Future)**:
+**Stage 2 (Current)**: Parameter-space fusion from cached fitted SMPL
+- Per-view source: offline cached MHR-to-SMPL fits from `scripts/precompute_input_smpl.py`
+- Per-view training input: canonical `body_pose_6d + betas`
+- Initialization: weighted permutation-invariant averaging across per-view canonical parameters
+- Refinement: iterative residual updates in canonical parameter space
+- Final output: fused canonical `smpl_betas + smpl_body_pose`
+- Supervision: final parameter loss, initialization auxiliary loss, and SMPL joint loss in canonical space
+- `global_orient`, `transl`, `pred_cam_t`, and `cam_int` remain auxiliary rather than direct Stage 2 model inputs
+
+**Future beyond Stage 2**:
 - Add explicit per-view relative camera prediction for reprojection and image-space visualization
-- Explore stronger set encoders or optimization-based fusion methods
+- Explore stronger set encoders or optimization-based fusion methods after the parameter-space baseline is stable
 
 ## Evaluation
 
@@ -240,5 +282,5 @@ projected with the saved per-view `cam_int`.
 
 - `scripts/visualize.py` saves RGB, predicted overlay, GT overlay, and combined overlay for each selected camera view
 - Overlay placement uses HuMMan GT `global_orient`, `transl`, and camera extrinsics for both meshes
-- This is a qualitative comparison of fused body shape/pose, not evidence that Stage 1 predicts cameras or root placement
+- This is a qualitative comparison of fused body shape/pose, not evidence that Stage 1 or Stage 2 predicts cameras or root placement
 - Future: replace the above with model-predicted per-view relative cameras

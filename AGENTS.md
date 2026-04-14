@@ -8,15 +8,23 @@ Preferred training framework:
 - PyTorch Lightning
 
 Current Stage 1 scope:
-- Input per view: `smpl_betas + smpl_body_pose`
+- Input per view: `mhr_model_params + shape_params`
 - Fusion: simple MLP-based, permutation-invariant fusion
 - Target: fused canonical body in a pelvis-centered, SMPL root rotation-removed space
+
+Current Stage 2 scope:
+- Precompute offline per-view fitted SMPL from MHR compact parameters
+- Input per view: canonical fitted SMPL `body_pose + betas`
+- Internal pose representation: per-joint 6D rotations for fusion/refinement
+- Initialization: weighted permutation-invariant fusion in canonical parameter space
+- Prediction: iterative residual refinement of canonical SMPL parameters
+- Target: fused canonical body in the same pelvis-centered, SMPL root rotation-removed space as Stage 1
 
 Out of scope for Stage 1:
 - Learned per-view camera prediction
 - Strong geometry claims beyond canonical-body fusion
 
-Auxiliary fields such as `smpl_global_orient`, `pred_cam_t`, and `cam_int` may still be used for qualitative visualization.
+Auxiliary fields such as `smpl_global_orient`, `pred_cam_t`, and `cam_int` may still be used for qualitative visualization or camera-frame evaluation, but they are not primary Stage 2 training inputs.
 
 ## 2. Python Environment
 
@@ -43,7 +51,7 @@ Recommended environment workflow:
 - run one-off commands: `uv run <command>`
 - enter the environment: `source .venv/bin/activate`
 - verify Python version: `uv run python --version`
-- run tests: `uv run pytest -q`
+- run repo tests: `uv run pytest -q tests`
 
 Environment note:
 - the checked-in environment is defined by `pyproject.toml` plus `uv.lock`
@@ -68,14 +76,18 @@ MvHPE3D/
 ├── configs/
 │   ├── config.yaml
 │   ├── data/
-│   │   └── humman_stage1.yaml
+│   │   ├── humman_stage1.yaml
+│   │   └── humman_stage2.yaml
 │   ├── model/
-│   │   └── stage1_mlp.yaml
+│   │   ├── stage1_mlp.yaml
+│   │   └── stage2_param_refine.yaml
 │   ├── trainer/
 │   │   └── default.yaml
 │   └── experiment/
-│       └── stage1_cross_camera.yaml
+│       ├── stage1_cross_camera.yaml
+│       └── stage2_cross_camera.yaml
 ├── scripts/
+│   ├── precompute_input_smpl.py
 │   ├── train.py
 │   ├── validate.py
 │   ├── test.py
@@ -87,7 +99,8 @@ MvHPE3D/
 │       │   ├── __init__.py
 │       │   ├── datamodule.py
 │       │   ├── datasets/
-│       │   │   └── humman_multiview.py
+│       │   │   ├── humman_multiview.py
+│       │   │   └── humman_stage2_multiview.py
 │       │   ├── splits.py
 │       │   ├── collate.py
 │       │   └── canonicalization.py
@@ -96,11 +109,14 @@ MvHPE3D/
 │       │   ├── components/
 │       │   │   ├── mlp.py
 │       │   │   └── deepsets.py
-│       │   └── stage1/
-│       │       └── mlp_fusion.py
+│       │   ├── stage1/
+│       │   │   └── mlp_fusion.py
+│       │   └── stage2/
+│       │       └── param_refine.py
 │       ├── lightning/
 │       │   ├── __init__.py
-│       │   └── stage1_module.py
+│       │   ├── stage1_module.py
+│       │   └── stage2_module.py
 │       ├── losses/
 │       │   └── smpl_loss.py
 │       ├── metrics/
@@ -113,6 +129,7 @@ MvHPE3D/
 │       └── utils/
 │           ├── io.py
 │           ├── logging.py
+│           ├── rotation.py
 │           └── seed.py
 └── tests/
     ├── test_canonicalization.py
@@ -123,12 +140,12 @@ MvHPE3D/
 File ownership guidance:
 - `external/sam-3d-body/`: pinned external dependency containing the modified SAM3DBody exporter and inference code
 - `configs/`: experiment configuration, split into data, model, trainer, and composed experiments
-- `scripts/`: thin entrypoints only; they should mostly instantiate config, datamodule, LightningModule, and `Trainer`
+- `scripts/`: thin entrypoints only; `precompute_input_smpl.py` is the offline bridge from compact MHR outputs to cached per-view fitted SMPL for Stage 2
 - `src/mvhpe3d/data/`: dataset definitions, split logic, collation, and canonicalization
-- `src/mvhpe3d/models/`: pure PyTorch model components and stage-specific architectures
+- `src/mvhpe3d/models/`: pure PyTorch model components and stage-specific architectures; Stage 2 should stay in parameter space unless there is a strong reason to move to mesh-state learning
 - `src/mvhpe3d/lightning/`: LightningModule wrappers for training, validation, testing, logging, and optimizer setup
-- `src/mvhpe3d/visualization/`: canonical renders and image overlays; Stage 1 overlay logic stays separate from learned model code
-- `tests/`: unit tests for canonicalization, dataset schema, and baseline model behavior
+- `src/mvhpe3d/visualization/`: canonical renders and image overlays; overlay logic stays separate from learned model code
+- `tests/`: unit tests for canonicalization, dataset schema, and model behavior
 
 This structure is intentionally a bit ahead of the current scaffold so the codebase has room to grow without mixing data logic, model math, and Lightning orchestration.
 
@@ -159,11 +176,13 @@ Since this is a research repo, it is acceptable for documentation and code struc
 
 Default principles for this repository:
 - Keep Stage 1 simple and defensible before adding more ambitious modeling
+- Make Stage 2 a parameter-space refinement baseline before considering mesh-state methods
 - Prefer a clear baseline over premature architectural complexity
 - Reduce ambiguity in coordinate systems, targets, and evaluation before optimizing model design
 - Separate learned outputs from visualization tricks in both code and docs
 - Make claims match the implementation
 - Preserve permutation invariance when multi-view input ordering should not matter
+- Prefer offline cached expensive preprocessing over online fitting inside the training loop when it keeps experiments reproducible
 - Keep pure model code separate from PyTorch Lightning training orchestration
 
 When in doubt, choose the simplest design that makes the experiment easy to reproduce and easy to falsify.

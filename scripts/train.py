@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Train the Stage 1 baseline with PyTorch Lightning."""
+"""Train Stage 1 or Stage 2 experiments with PyTorch Lightning."""
 
 from __future__ import annotations
 
@@ -19,17 +19,24 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from mvhpe3d.data import Stage1DataConfig, Stage1HuMManDataModule
-from mvhpe3d.lightning import Stage1FusionLightningModule, Stage1OptimizationConfig
-from mvhpe3d.losses import Stage1LossConfig
+from mvhpe3d.data import Stage2DataConfig, Stage2HuMManDataModule
+from mvhpe3d.lightning import (
+    Stage1FusionLightningModule,
+    Stage1OptimizationConfig,
+    Stage2FusionLightningModule,
+    Stage2OptimizationConfig,
+)
+from mvhpe3d.losses import Stage1LossConfig, Stage2LossConfig
 from mvhpe3d.models import (
     Stage1MLPFusionConfig,
     Stage1ResidualFusionConfig,
+    Stage2ParamRefineConfig,
 )
 from mvhpe3d.utils import load_experiment_config, validate_mhr_asset_folder
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train the Stage 1 MvHPE3D baseline")
+    parser = argparse.ArgumentParser(description="Train an MvHPE3D experiment")
     parser.add_argument(
         "--config",
         type=str,
@@ -154,23 +161,22 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     experiment = load_experiment_config(args.config)
-    validate_required_mhr_assets(args)
+    validate_required_mhr_assets(args, experiment=experiment)
 
     data_config = build_data_config(experiment["data"], args)
     model_config = build_model_config(experiment["model"], args)
-    loss_config = build_loss_config(experiment["loss"], args)
-    optimization_config = Stage1OptimizationConfig(**experiment["optimizer"])
+    loss_config = build_loss_config(experiment["loss"], args, model_config=model_config)
+    optimization_config = build_optimization_config(experiment["optimizer"], model_config=model_config)
 
     L.seed_everything(data_config.seed, workers=True)
 
-    datamodule = Stage1HuMManDataModule(data_config)
-    module = Stage1FusionLightningModule(
+    datamodule = build_datamodule(data_config)
+    module = build_lightning_module(
         model_config=model_config,
         loss_config=loss_config,
         optimization_config=optimization_config,
-        smpl_model_path=args.smpl_model_path,
-        mhr_assets_dir=args.mhr_assets_dir,
-        input_smpl_cache_dir=resolve_input_smpl_cache_dir(args, data_config),
+        data_config=data_config,
+        args=args,
     )
 
     trainer_config = build_trainer_config(experiment["trainer"], args, experiment["experiment_name"])
@@ -184,9 +190,12 @@ def main() -> None:
     )
 
 
-def build_data_config(config: dict[str, Any], args: argparse.Namespace) -> Stage1DataConfig:
+def build_data_config(
+    config: dict[str, Any],
+    args: argparse.Namespace,
+) -> Stage1DataConfig | Stage2DataConfig:
     data_kwargs = dict(config)
-    data_kwargs.pop("name", None)
+    data_name = str(data_kwargs.pop("name", "humman_stage1"))
     data_kwargs.pop("_config_path", None)
 
     if args.manifest_path is not None:
@@ -203,6 +212,11 @@ def build_data_config(config: dict[str, Any], args: argparse.Namespace) -> Stage
         data_kwargs["seed"] = args.seed
     if args.fast_dev_run:
         data_kwargs["drop_last_train"] = False
+    if data_name == "humman_stage2":
+        input_smpl_cache_dir = getattr(args, "input_smpl_cache_dir", None)
+        if input_smpl_cache_dir is not None:
+            data_kwargs["input_smpl_cache_dir"] = input_smpl_cache_dir
+        return Stage2DataConfig(**data_kwargs)
 
     return Stage1DataConfig(**data_kwargs)
 
@@ -213,10 +227,13 @@ def build_model_config(
 ) -> (
     Stage1MLPFusionConfig
     | Stage1ResidualFusionConfig
+    | Stage2ParamRefineConfig
 ):
     model_kwargs = dict(config)
     model_name = str(model_kwargs.pop("name", "stage1_mlp_fusion"))
     model_kwargs.pop("_config_path", None)
+    if model_name == "stage2_param_refine":
+        return Stage2ParamRefineConfig(**model_kwargs)
     if args.disable_learn_betas:
         model_kwargs["learn_betas"] = False
     if model_name == "stage1_residual_fusion":
@@ -224,12 +241,29 @@ def build_model_config(
     return Stage1MLPFusionConfig(**model_kwargs)
 
 
-def build_loss_config(config: dict[str, Any], args: argparse.Namespace) -> Stage1LossConfig:
+def build_loss_config(
+    config: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    model_config: Stage1MLPFusionConfig | Stage1ResidualFusionConfig | Stage2ParamRefineConfig,
+) -> Stage1LossConfig | Stage2LossConfig:
     loss_kwargs = dict(config)
+    if isinstance(model_config, Stage2ParamRefineConfig):
+        return Stage2LossConfig(**loss_kwargs)
     if args.disable_learn_betas:
         loss_kwargs["supervise_betas"] = False
         loss_kwargs["betas_weight"] = 0.0
     return Stage1LossConfig(**loss_kwargs)
+
+
+def build_optimization_config(
+    config: dict[str, Any],
+    *,
+    model_config: Stage1MLPFusionConfig | Stage1ResidualFusionConfig | Stage2ParamRefineConfig,
+) -> Stage1OptimizationConfig | Stage2OptimizationConfig:
+    if isinstance(model_config, Stage2ParamRefineConfig):
+        return Stage2OptimizationConfig(**config)
+    return Stage1OptimizationConfig(**config)
 
 
 def build_trainer_config(
@@ -318,8 +352,8 @@ def _parse_devices_arg(value: str) -> int | str | list[int]:
 def maybe_run_test_after_train(
     trainer: L.Trainer,
     *,
-    module: Stage1FusionLightningModule,
-    datamodule: Stage1HuMManDataModule,
+    module,
+    datamodule,
     args: argparse.Namespace,
 ) -> None:
     if not args.test_after_train:
@@ -338,8 +372,14 @@ def maybe_run_test_after_train(
     trainer.test(model=None, datamodule=datamodule, ckpt_path=ckpt_path)
 
 
-def validate_required_mhr_assets(args: argparse.Namespace) -> None:
+def validate_required_mhr_assets(
+    args: argparse.Namespace,
+    *,
+    experiment: dict[str, Any],
+) -> None:
     if not args.test_after_train:
+        return
+    if is_stage2_experiment(experiment):
         return
     validate_mhr_asset_folder(args.mhr_assets_dir or "/opt/data/assets")
 
@@ -369,12 +409,49 @@ def resolve_test_after_train_ckpt_path(
 
 def resolve_input_smpl_cache_dir(
     args: argparse.Namespace,
-    data_config: Stage1DataConfig,
+    data_config: Stage1DataConfig | Stage2DataConfig,
 ) -> str:
     if args.input_smpl_cache_dir is not None:
         return str(Path(args.input_smpl_cache_dir).resolve())
     manifest_parent = Path(data_config.manifest_path).resolve().parent
     return str((manifest_parent / "sam3dbody_fitted_smpl").resolve())
+
+
+def build_datamodule(data_config: Stage1DataConfig | Stage2DataConfig):
+    if isinstance(data_config, Stage2DataConfig):
+        return Stage2HuMManDataModule(data_config)
+    return Stage1HuMManDataModule(data_config)
+
+
+def build_lightning_module(
+    *,
+    model_config,
+    loss_config,
+    optimization_config,
+    data_config: Stage1DataConfig | Stage2DataConfig,
+    args: argparse.Namespace,
+):
+    if isinstance(model_config, Stage2ParamRefineConfig):
+        return Stage2FusionLightningModule(
+            model_config=model_config,
+            loss_config=loss_config,
+            optimization_config=optimization_config,
+            smpl_model_path=args.smpl_model_path,
+        )
+    return Stage1FusionLightningModule(
+        model_config=model_config,
+        loss_config=loss_config,
+        optimization_config=optimization_config,
+        smpl_model_path=args.smpl_model_path,
+        mhr_assets_dir=args.mhr_assets_dir,
+        input_smpl_cache_dir=resolve_input_smpl_cache_dir(args, data_config),
+    )
+
+
+def is_stage2_experiment(experiment: dict[str, Any]) -> bool:
+    model_name = str(experiment.get("model", {}).get("name", ""))
+    data_name = str(experiment.get("data", {}).get("name", ""))
+    return model_name == "stage2_param_refine" or data_name == "humman_stage2"
 
 
 if __name__ == "__main__":

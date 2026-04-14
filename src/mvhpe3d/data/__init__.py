@@ -1,12 +1,20 @@
 """Data loading utilities for MvHPE3D."""
 
-from .canonicalization import canonicalize_stage1_target
+from .canonicalization import canonicalize_stage1_target, canonicalize_stage2_target
 from .collate import multiview_collate
-from .datamodule import Stage1DataConfig, Stage1HuMManDataModule
+from .datamodule import (
+    Stage1DataConfig,
+    Stage1HuMManDataModule,
+    Stage2DataConfig,
+    Stage2HuMManDataModule,
+)
 
 __all__ = [
     "Stage1DataConfig",
     "Stage1HuMManDataModule",
+    "Stage2DataConfig",
+    "Stage2HuMManDataModule",
     "canonicalize_stage1_target",
+    "canonicalize_stage2_target",
     "multiview_collate",
 ]

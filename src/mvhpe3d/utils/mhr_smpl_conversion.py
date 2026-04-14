@@ -20,6 +20,15 @@ NUM_FACE_EXPRESSION_COEFFS = 72
 RESULT_PARAMETER_KEYS = ("betas", "body_pose", "global_orient", "transl")
 
 
+def cache_path_for_source_npz(cache_dir: str | Path, source_npz_path: str | Path) -> Path:
+    """Return the fitted-SMPL cache path corresponding to one source prediction file."""
+    resolved_cache_dir = Path(cache_dir).resolve()
+    resolved_source = Path(source_npz_path).resolve()
+    digest = hashlib.sha1(str(resolved_source).encode("utf-8")).hexdigest()[:12]
+    stem = resolved_source.stem
+    return resolved_cache_dir / f"{stem}.{digest}.npz"
+
+
 def resolve_mhr_asset_folder(path_arg: str | None = None) -> Path:
     """Resolve the MHR asset directory from an explicit argument or known defaults."""
     if path_arg is not None:
@@ -231,10 +240,7 @@ class MHRToSMPLConverter:
 
     def _cache_path_for_source(self, source_npz_path: str) -> Path:
         assert self.cache_dir is not None
-        resolved_source = Path(source_npz_path).resolve()
-        digest = hashlib.sha1(str(resolved_source).encode("utf-8")).hexdigest()[:12]
-        stem = resolved_source.stem
-        return self.cache_dir / f"{stem}.{digest}.npz"
+        return cache_path_for_source_npz(self.cache_dir, source_npz_path)
 
     def _load_cached_result(self, source_npz_path: str) -> dict[str, torch.Tensor] | None:
         cache_path = self._cache_path_for_source(source_npz_path)

@@ -13,6 +13,8 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from mvhpe3d.utils import cache_path_for_source_npz
+
 
 def _write_prediction_npz(path: Path) -> None:
     payload = {
@@ -33,6 +35,18 @@ def _write_gt_smpl_sequence(path: Path, *, num_frames: int) -> None:
         "transl": np.zeros((num_frames, 3), dtype=np.float32),
     }
     np.savez(path, **payload)
+
+
+def _write_cached_input_smpl(cache_dir: Path, source_npz_path: Path) -> None:
+    cache_path = cache_path_for_source_npz(cache_dir, source_npz_path)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "body_pose": np.zeros(69, dtype=np.float32),
+        "betas": np.zeros(10, dtype=np.float32),
+        "global_orient": np.zeros(3, dtype=np.float32),
+        "transl": np.zeros(3, dtype=np.float32),
+    }
+    np.savez(cache_path, **payload)
 
 
 def _write_camera_json(path: Path, *, camera_ids: list[str]) -> None:
@@ -81,6 +95,15 @@ def sample_manifest(tmp_path: Path) -> Path:
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps({"samples": samples}), encoding="utf-8")
     return manifest_path
+
+
+@pytest.fixture()
+def sample_input_smpl_cache(sample_manifest: Path) -> Path:
+    cache_dir = sample_manifest.parent / "sam3dbody_fitted_smpl"
+    cache_dir.mkdir(exist_ok=True)
+    for npz_path in sample_manifest.parent.glob("kinect_*.npz"):
+        _write_cached_input_smpl(cache_dir, npz_path)
+    return cache_dir
 
 
 @pytest.fixture()

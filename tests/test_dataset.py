@@ -3,8 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from mvhpe3d.data import Stage1DataConfig, Stage1HuMManDataModule
-from mvhpe3d.data.datasets import HuMManStage1Dataset
+from mvhpe3d.data import (
+    Stage1DataConfig,
+    Stage1HuMManDataModule,
+    Stage2DataConfig,
+    Stage2HuMManDataModule,
+)
+from mvhpe3d.data.datasets import HuMManStage1Dataset, HuMManStage2Dataset
 from mvhpe3d.data.splits import (
     filter_records_by_split,
     load_sample_records,
@@ -74,6 +79,57 @@ def test_stage1_datamodule_builds_train_val_and_test_batches(sample_manifest: Pa
     assert val_batch["meta"][0]["sample_id"] == "sample_val"
     assert test_batch["meta"][0]["sample_id"] == "sample_test"
     assert len(test_batch["meta"][0]["view_npz_paths"]) == 2
+
+
+def test_humman_stage2_dataset_returns_expected_schema(
+    sample_manifest: Path,
+    sample_input_smpl_cache: Path,
+) -> None:
+    records = filter_records_by_split(load_sample_records(sample_manifest), "train")
+    dataset = HuMManStage2Dataset(
+        records,
+        num_views=2,
+        train=False,
+        gt_smpl_dir=sample_manifest.parent / "smpl",
+        cameras_dir=sample_manifest.parent / "cameras",
+        input_smpl_cache_dir=sample_input_smpl_cache,
+    )
+
+    sample = dataset[0]
+
+    assert tuple(sample["views_input"].shape) == (2, 148)
+    assert tuple(sample["target_body_pose"].shape) == (69,)
+    assert tuple(sample["target_body_pose_6d"].shape) == (23, 6)
+    assert tuple(sample["target_betas"].shape) == (10,)
+    assert tuple(sample["view_aux"]["pred_cam_t"].shape) == (2, 3)
+    assert sample["meta"]["sample_id"] == "sample_train"
+
+
+def test_stage2_datamodule_builds_train_val_and_test_batches(
+    sample_manifest: Path,
+    sample_input_smpl_cache: Path,
+) -> None:
+    datamodule = Stage2HuMManDataModule(
+        Stage2DataConfig(
+            manifest_path=str(sample_manifest),
+            input_smpl_cache_dir=str(sample_input_smpl_cache),
+            num_views=2,
+            batch_size=1,
+            drop_last_train=False,
+        )
+    )
+
+    datamodule.prepare_data()
+    datamodule.setup(None)
+
+    train_batch = next(iter(datamodule.train_dataloader()))
+    val_batch = next(iter(datamodule.val_dataloader()))
+    test_batch = next(iter(datamodule.test_dataloader()))
+
+    assert tuple(train_batch["views_input"].shape) == (1, 2, 148)
+    assert tuple(val_batch["views_input"].shape) == (1, 2, 148)
+    assert tuple(test_batch["views_input"].shape) == (1, 2, 148)
+    assert tuple(train_batch["target_body_pose_6d"].shape) == (1, 23, 6)
 
 
 def test_resolve_split_records_filters_views_by_named_policy(

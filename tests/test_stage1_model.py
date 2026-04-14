@@ -4,9 +4,19 @@ import importlib.util
 from argparse import Namespace
 from pathlib import Path
 
-from mvhpe3d.data import Stage1DataConfig, Stage1HuMManDataModule
-from mvhpe3d.lightning import Stage1FusionLightningModule
-from mvhpe3d.models import Stage1MLPFusionConfig, Stage1MLPFusionModel
+from mvhpe3d.data import (
+    Stage1DataConfig,
+    Stage1HuMManDataModule,
+    Stage2DataConfig,
+    Stage2HuMManDataModule,
+)
+from mvhpe3d.lightning import Stage1FusionLightningModule, Stage2FusionLightningModule
+from mvhpe3d.models import (
+    Stage1MLPFusionConfig,
+    Stage1MLPFusionModel,
+    Stage2ParamRefineConfig,
+    Stage2ParamRefineModel,
+)
 from mvhpe3d.utils import load_experiment_config
 
 
@@ -45,6 +55,84 @@ def test_stage1_lightning_module_training_step(sample_manifest: Path) -> None:
     loss = module.training_step(batch, 0)
 
     assert loss.ndim == 0
+
+
+def test_stage2_model_forward_shapes() -> None:
+    model = Stage2ParamRefineModel(Stage2ParamRefineConfig())
+    outputs = model.forward(__import__("torch").zeros(2, 3, 148))
+
+    assert tuple(outputs["init_pose_6d"].shape) == (2, 23, 6)
+    assert tuple(outputs["pred_body_pose"].shape) == (2, 69)
+    assert tuple(outputs["pred_betas"].shape) == (2, 10)
+    assert tuple(outputs["view_weights"].shape) == (2, 3)
+
+
+def test_stage2_lightning_module_training_step(
+    sample_manifest: Path,
+    sample_input_smpl_cache: Path,
+) -> None:
+    datamodule = Stage2HuMManDataModule(
+        Stage2DataConfig(
+            manifest_path=str(sample_manifest),
+            input_smpl_cache_dir=str(sample_input_smpl_cache),
+            num_views=2,
+            batch_size=1,
+            drop_last_train=False,
+        )
+    )
+    datamodule.setup("fit")
+    batch = next(iter(datamodule.train_dataloader()))
+
+    module = Stage2FusionLightningModule(model_config=Stage2ParamRefineConfig())
+    monkeypatch_torch = __import__("torch")
+    dummy_joints = monkeypatch_torch.zeros(1, 24, 3)
+    module._runtime_cache["smpl_eval_model"] = lambda **_: None
+    module._build_smpl_joints = lambda **_: dummy_joints
+    loss = module.training_step(batch, 0)
+
+    assert loss.ndim == 0
+
+
+def test_stage2_lightning_module_validation_step_adds_joint_metrics(
+    sample_manifest: Path,
+    sample_input_smpl_cache: Path,
+    monkeypatch,
+) -> None:
+    datamodule = Stage2HuMManDataModule(
+        Stage2DataConfig(
+            manifest_path=str(sample_manifest),
+            input_smpl_cache_dir=str(sample_input_smpl_cache),
+            num_views=2,
+            batch_size=1,
+            drop_last_train=False,
+        )
+    )
+    datamodule.setup("fit")
+    batch = next(iter(datamodule.val_dataloader()))
+
+    module = Stage2FusionLightningModule(model_config=Stage2ParamRefineConfig())
+    monkeypatch.setattr(
+        module,
+        "_compute_canonical_joint_metrics",
+        lambda **_: {
+            "mpjpe": __import__("torch").tensor(10.0),
+            "pa_mpjpe": __import__("torch").tensor(5.0),
+        },
+    )
+    monkeypatch.setattr(module, "_compute_canonical_joint_loss", lambda **_: __import__("torch").tensor(0.0))
+
+    metrics = module._shared_step(batch, stage="val")
+
+    assert metrics["val/mpjpe"].item() == 10.0
+    assert metrics["val/pa_mpjpe"].item() == 5.0
+
+
+def test_load_stage2_experiment_config_resolves_sections() -> None:
+    experiment = load_experiment_config("configs/experiment/stage2_cross_camera.yaml")
+
+    assert experiment["experiment_name"] == "stage2_cross_camera"
+    assert experiment["data"]["name"] == "humman_stage2"
+    assert experiment["model"]["name"] == "stage2_param_refine"
 
 
 def test_stage1_lightning_module_validation_step_adds_joint_metrics(

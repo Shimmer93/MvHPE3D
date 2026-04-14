@@ -1,0 +1,11 @@
+name: "stage2_param_refine"
+num_joints: 23
+pose_6d_dim: 138
+betas_dim: 10
+hidden_dim: 512
+latent_dim: 512
+encoder_layers: 3
+weight_head_layers: 2
+refinement_layers: 3
+num_iterations: 1
+dropout: 0.1
