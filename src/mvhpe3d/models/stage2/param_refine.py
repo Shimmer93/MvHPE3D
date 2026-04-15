@@ -17,6 +17,7 @@ class Stage2ParamRefineConfig:
     """Configuration for the Stage 2 parameter refinement model."""
 
     name: str = "stage2_param_refine"
+    learn_betas: bool = True
     num_joints: int = 23
     pose_6d_dim: int = 138
     betas_dim: int = 10
@@ -64,7 +65,7 @@ class Stage2ParamRefineModel(nn.Module):
         self.refinement_head = MLP(
             input_dim=config.latent_dim,
             hidden_dim=config.hidden_dim,
-            output_dim=config.input_dim,
+            output_dim=config.pose_6d_dim + (config.betas_dim if config.learn_betas else 0),
             num_layers=config.refinement_layers,
             dropout=config.dropout,
         )
@@ -111,7 +112,14 @@ class Stage2ParamRefineModel(nn.Module):
                 refinement_features * view_weights.unsqueeze(-1),
                 dim=1,
             )
-            current_state = current_state + self.refinement_head(pooled_refinement)
+            refinement_delta = self.refinement_head(pooled_refinement)
+            if self.config.learn_betas:
+                current_state = current_state + refinement_delta
+            else:
+                current_pose = current_state[:, : self.config.pose_6d_dim]
+                current_betas = current_state[:, self.config.pose_6d_dim :]
+                pose_delta = refinement_delta[:, : self.config.pose_6d_dim]
+                current_state = torch.cat((current_pose + pose_delta, current_betas), dim=-1)
 
         init_pose_6d = initial_state[:, : self.config.pose_6d_dim].reshape(
             batch_size,

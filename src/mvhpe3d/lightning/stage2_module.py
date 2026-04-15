@@ -10,7 +10,12 @@ import torch.nn.functional as F
 
 from mvhpe3d.losses import Stage2Loss, Stage2LossConfig
 from mvhpe3d.metrics import SMPL_EVAL_NUM_JOINTS, batch_mpjpe, batch_pa_mpjpe, root_center_joints
-from mvhpe3d.models import Stage2ParamRefineConfig, Stage2ParamRefineModel
+from mvhpe3d.models import (
+    Stage2JointResidualConfig,
+    Stage2JointResidualModel,
+    Stage2ParamRefineConfig,
+    Stage2ParamRefineModel,
+)
 from mvhpe3d.utils import build_smpl_model
 
 
@@ -30,21 +35,25 @@ class Stage2FusionLightningModule(L.LightningModule):
     def __init__(
         self,
         *,
-        model_config: Stage2ParamRefineConfig | dict | None = None,
+        model_config: Stage2JointResidualConfig | Stage2ParamRefineConfig | dict | None = None,
         loss_config: Stage2LossConfig | dict | None = None,
         optimization_config: Stage2OptimizationConfig | dict | None = None,
         smpl_model_path: str | None = None,
     ) -> None:
         super().__init__()
-        self.model_config = _coerce_dataclass_config(model_config, Stage2ParamRefineConfig)
+        self.model_config = _coerce_stage2_model_config(model_config)
         self.loss_config = _coerce_dataclass_config(loss_config, Stage2LossConfig)
+        if not self.model_config.learn_betas:
+            self.loss_config.supervise_betas = False
+            self.loss_config.betas_weight = 0.0
+            self.loss_config.init_betas_weight = 0.0
         self.optimization_config = _coerce_dataclass_config(
             optimization_config,
             Stage2OptimizationConfig,
         )
         self.smpl_model_path = smpl_model_path
 
-        self.model = Stage2ParamRefineModel(self.model_config)
+        self.model = _build_stage2_model(self.model_config)
         self.criterion = Stage2Loss(self.loss_config)
         self._runtime_cache: dict[str, object | None] = {
             "smpl_eval_model": None,
@@ -70,6 +79,7 @@ class Stage2FusionLightningModule(L.LightningModule):
             on_step=True,
             on_epoch=True,
             prog_bar=True,
+            sync_dist=False,
         )
         return metrics["train/loss"]
 
@@ -81,6 +91,7 @@ class Stage2FusionLightningModule(L.LightningModule):
             on_step=False,
             on_epoch=True,
             prog_bar=True,
+            sync_dist=True,
         )
         return metrics["val/loss"]
 
@@ -92,6 +103,7 @@ class Stage2FusionLightningModule(L.LightningModule):
             on_step=False,
             on_epoch=True,
             prog_bar=False,
+            sync_dist=True,
         )
         return metrics["test/loss"]
 
@@ -272,6 +284,7 @@ class Stage2FusionLightningModule(L.LightningModule):
         on_step: bool,
         on_epoch: bool,
         prog_bar: bool,
+        sync_dist: bool = False,
     ) -> None:
         if getattr(self, "_trainer", None) is None:
             return
@@ -281,6 +294,7 @@ class Stage2FusionLightningModule(L.LightningModule):
             on_epoch=on_epoch,
             prog_bar=prog_bar,
             batch_size=batch_size,
+            sync_dist=sync_dist,
         )
 
 
@@ -292,3 +306,25 @@ def _coerce_dataclass_config(value, config_type):
     if isinstance(value, dict):
         return config_type(**value)
     raise TypeError(f"Expected {config_type.__name__}, dict, or None; got {type(value)!r}")
+
+
+def _coerce_stage2_model_config(value):
+    if value is None:
+        return Stage2ParamRefineConfig()
+    if isinstance(value, (Stage2ParamRefineConfig, Stage2JointResidualConfig)):
+        return value
+    if isinstance(value, dict):
+        model_name = str(value.get("name", "stage2_param_refine"))
+        if model_name == "stage2_joint_residual":
+            return Stage2JointResidualConfig(**value)
+        return Stage2ParamRefineConfig(**value)
+    raise TypeError(
+        "Expected Stage2JointResidualConfig, Stage2ParamRefineConfig, dict, or None; "
+        f"got {type(value)!r}"
+    )
+
+
+def _build_stage2_model(config):
+    if isinstance(config, Stage2JointResidualConfig):
+        return Stage2JointResidualModel(config)
+    return Stage2ParamRefineModel(config)

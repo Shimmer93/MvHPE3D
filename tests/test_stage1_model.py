@@ -14,6 +14,8 @@ from mvhpe3d.lightning import Stage1FusionLightningModule, Stage2FusionLightning
 from mvhpe3d.models import (
     Stage1MLPFusionConfig,
     Stage1MLPFusionModel,
+    Stage2JointResidualConfig,
+    Stage2JointResidualModel,
     Stage2ParamRefineConfig,
     Stage2ParamRefineModel,
 )
@@ -65,6 +67,17 @@ def test_stage2_model_forward_shapes() -> None:
     assert tuple(outputs["pred_body_pose"].shape) == (2, 69)
     assert tuple(outputs["pred_betas"].shape) == (2, 10)
     assert tuple(outputs["view_weights"].shape) == (2, 3)
+
+
+def test_stage2_joint_residual_model_forward_shapes() -> None:
+    model = Stage2JointResidualModel(Stage2JointResidualConfig())
+    outputs = model.forward(__import__("torch").zeros(2, 3, 148))
+
+    assert tuple(outputs["init_pose_6d"].shape) == (2, 23, 6)
+    assert tuple(outputs["pred_body_pose"].shape) == (2, 69)
+    assert tuple(outputs["pred_betas"].shape) == (2, 10)
+    assert tuple(outputs["view_weights"].shape) == (2, 3)
+    assert tuple(outputs["pose_view_weights"].shape) == (2, 3, 23)
 
 
 def test_stage2_lightning_module_training_step(
@@ -127,12 +140,48 @@ def test_stage2_lightning_module_validation_step_adds_joint_metrics(
     assert metrics["val/pa_mpjpe"].item() == 5.0
 
 
+def test_stage2_lightning_module_disabling_betas_zeros_beta_losses(
+    sample_manifest: Path,
+    sample_input_smpl_cache: Path,
+    monkeypatch,
+) -> None:
+    datamodule = Stage2HuMManDataModule(
+        Stage2DataConfig(
+            manifest_path=str(sample_manifest),
+            input_smpl_cache_dir=str(sample_input_smpl_cache),
+            num_views=2,
+            batch_size=1,
+            drop_last_train=False,
+        )
+    )
+    datamodule.setup("fit")
+    batch = next(iter(datamodule.train_dataloader()))
+
+    module = Stage2FusionLightningModule(
+        model_config=Stage2ParamRefineConfig(learn_betas=False),
+    )
+    monkeypatch.setattr(module, "_compute_canonical_joint_loss", lambda **_: __import__("torch").tensor(0.0))
+
+    metrics = module._shared_step(batch, stage="train")
+
+    assert metrics["train/loss_betas"].item() == 0.0
+    assert metrics["train/loss_init_betas"].item() == 0.0
+
+
 def test_load_stage2_experiment_config_resolves_sections() -> None:
     experiment = load_experiment_config("configs/experiment/stage2_cross_camera.yaml")
 
     assert experiment["experiment_name"] == "stage2_cross_camera"
     assert experiment["data"]["name"] == "humman_stage2"
     assert experiment["model"]["name"] == "stage2_param_refine"
+
+
+def test_load_stage2_joint_residual_experiment_config_resolves_sections() -> None:
+    experiment = load_experiment_config("configs/experiment/stage2_cross_camera_joint_residual.yaml")
+
+    assert experiment["experiment_name"] == "stage2_cross_camera_joint_residual"
+    assert experiment["data"]["name"] == "humman_stage2"
+    assert experiment["model"]["name"] == "stage2_joint_residual"
 
 
 def test_stage1_lightning_module_validation_step_adds_joint_metrics(

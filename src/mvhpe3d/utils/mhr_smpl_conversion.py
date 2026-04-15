@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import os
 import sys
 from pathlib import Path
@@ -350,10 +352,16 @@ class MHRToSMPLConverter:
                 "ignore",
                 message=r"You are using a SMPL model, with only 10 shape coefficients\.",
             )
-            smpl_model = smplx.SMPL(
-                model_path=str(self.smpl_model_path),
-                gender="neutral",
-            ).to(str(device))
+            warnings.filterwarnings(
+                "ignore",
+                category=np.exceptions.VisibleDeprecationWarning,
+                module=r"smplx\.body_models",
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                smpl_model = smplx.SMPL(
+                    model_path=str(self.smpl_model_path),
+                    gender="neutral",
+                ).to(str(device))
         smpl_template_mesh = trimesh.Trimesh(
             smpl_model.v_template.detach().cpu().numpy(),
             smpl_model.faces,

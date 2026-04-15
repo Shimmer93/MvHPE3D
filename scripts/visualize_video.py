@@ -38,6 +38,7 @@ from mvhpe3d.metrics import batch_mpjpe, batch_pa_mpjpe
 from mvhpe3d.models import (
     Stage1MLPFusionConfig,
     Stage1ResidualFusionConfig,
+    Stage2JointResidualConfig,
     Stage2ParamRefineConfig,
 )
 from mvhpe3d.utils import (
@@ -453,11 +454,18 @@ def build_model_config(
     config: dict[str, Any],
     *,
     checkpoint_path: str,
-) -> Stage1MLPFusionConfig | Stage1ResidualFusionConfig | Stage2ParamRefineConfig:
+) -> (
+    Stage1MLPFusionConfig
+    | Stage1ResidualFusionConfig
+    | Stage2JointResidualConfig
+    | Stage2ParamRefineConfig
+):
     model_kwargs = dict(config)
     model_name = str(model_kwargs.pop("name", "stage1_mlp_fusion"))
     model_kwargs.pop("_config_path", None)
     model_kwargs.update(load_checkpoint_model_overrides(checkpoint_path))
+    if model_name == "stage2_joint_residual":
+        return Stage2JointResidualConfig(**model_kwargs)
     if model_name == "stage2_param_refine":
         return Stage2ParamRefineConfig(**model_kwargs)
     if model_name == "stage1_residual_fusion":
@@ -649,7 +657,7 @@ def compute_input_joint_metrics(
 def is_stage2_experiment(experiment: dict[str, Any]) -> bool:
     model_name = str(experiment.get("model", {}).get("name", ""))
     data_name = str(experiment.get("data", {}).get("name", ""))
-    return model_name == "stage2_param_refine" or data_name == "humman_stage2"
+    return model_name in {"stage2_param_refine", "stage2_joint_residual"} or data_name == "humman_stage2"
 
 
 def build_datamodule(data_config: Stage1DataConfig | Stage2DataConfig):
@@ -661,11 +669,16 @@ def build_datamodule(data_config: Stage1DataConfig | Stage2DataConfig):
 def load_visualization_module(
     *,
     checkpoint_path: str,
-    model_config: Stage1MLPFusionConfig | Stage1ResidualFusionConfig | Stage2ParamRefineConfig,
+    model_config: (
+        Stage1MLPFusionConfig
+        | Stage1ResidualFusionConfig
+        | Stage2JointResidualConfig
+        | Stage2ParamRefineConfig
+    ),
     data_config: Stage1DataConfig | Stage2DataConfig,
     args: argparse.Namespace,
 ):
-    if isinstance(model_config, Stage2ParamRefineConfig):
+    if isinstance(model_config, (Stage2ParamRefineConfig, Stage2JointResidualConfig)):
         return Stage2FusionLightningModule.load_from_checkpoint(
             checkpoint_path,
             map_location="cpu",

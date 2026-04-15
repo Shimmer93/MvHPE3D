@@ -59,6 +59,7 @@ class Stage2LossConfig:
     joint_weight: float = 1.0
     init_pose_6d_weight: float = 0.25
     init_betas_weight: float = 0.025
+    supervise_betas: bool = True
 
 
 class Stage2Loss(nn.Module):
@@ -79,9 +80,13 @@ class Stage2Loss(nn.Module):
         init_betas: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         pose_6d_loss = F.mse_loss(pred_pose_6d, target_pose_6d)
-        betas_loss = F.mse_loss(pred_betas, target_betas)
+        if self.config.supervise_betas:
+            betas_loss = F.mse_loss(pred_betas, target_betas)
+            init_betas_loss = F.mse_loss(init_betas, target_betas)
+        else:
+            betas_loss = pose_6d_loss.new_zeros(())
+            init_betas_loss = pose_6d_loss.new_zeros(())
         init_pose_6d_loss = F.mse_loss(init_pose_6d, target_pose_6d)
-        init_betas_loss = F.mse_loss(init_betas, target_betas)
 
         total_loss = (
             self.config.pose_6d_weight * pose_6d_loss

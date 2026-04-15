@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 from pathlib import Path
 import warnings
 
+import numpy as np
 import smplx
 import torch
 
@@ -43,8 +46,14 @@ def build_smpl_model(
             "ignore",
             message=r"You are using a SMPL model, with only 10 shape coefficients\.",
         )
-        return smplx.SMPL(
-            model_path=str(resolved_path),
-            gender="neutral",
-            batch_size=batch_size,
-        ).to(device)
+        warnings.filterwarnings(
+            "ignore",
+            category=np.exceptions.VisibleDeprecationWarning,
+            module=r"smplx\.body_models",
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            return smplx.SMPL(
+                model_path=str(resolved_path),
+                gender="neutral",
+                batch_size=batch_size,
+            ).to(device)

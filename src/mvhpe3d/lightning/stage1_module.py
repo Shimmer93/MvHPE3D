@@ -99,6 +99,7 @@ class Stage1FusionLightningModule(L.LightningModule):
             on_step=True,
             on_epoch=True,
             prog_bar=True,
+            sync_dist=False,
         )
         return metrics["train/loss"]
 
@@ -110,6 +111,7 @@ class Stage1FusionLightningModule(L.LightningModule):
             on_step=False,
             on_epoch=True,
             prog_bar=True,
+            sync_dist=True,
         )
         return metrics["val/loss"]
 
@@ -121,6 +123,7 @@ class Stage1FusionLightningModule(L.LightningModule):
             on_step=False,
             on_epoch=True,
             prog_bar=False,
+            sync_dist=True,
         )
         return metrics["test/loss"]
 
@@ -499,6 +502,7 @@ class Stage1FusionLightningModule(L.LightningModule):
         on_step: bool,
         on_epoch: bool,
         prog_bar: bool,
+        sync_dist: bool = False,
     ) -> None:
         if getattr(self, "_trainer", None) is None:
             return
@@ -508,6 +512,7 @@ class Stage1FusionLightningModule(L.LightningModule):
             on_epoch=on_epoch,
             prog_bar=prog_bar,
             batch_size=batch_size,
+            sync_dist=sync_dist,
         )
 
     def _preprocess_views_input(self, views_input: torch.Tensor) -> torch.Tensor:

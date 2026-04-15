@@ -157,6 +157,7 @@ Primary documentation:
 Documentation expectations:
 - Keep the README aligned with the actual implemented scope
 - Document experimental assumptions explicitly, especially canonicalization, inputs, targets, and evaluation
+- In Markdown docs, use dollar-sign LaTeX delimiters for math: `$...$` for inline math and `$$...$$` for display math
 - When adding scripts or modules, prefer brief docstrings and clear CLI help over long inline comments
 - If a visualization uses a workaround or proxy signal, state that clearly in the docs
 - Keep config names descriptive and make experiment entrypoints map cleanly to config files

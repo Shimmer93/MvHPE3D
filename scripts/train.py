@@ -30,6 +30,7 @@ from mvhpe3d.losses import Stage1LossConfig, Stage2LossConfig
 from mvhpe3d.models import (
     Stage1MLPFusionConfig,
     Stage1ResidualFusionConfig,
+    Stage2JointResidualConfig,
     Stage2ParamRefineConfig,
 )
 from mvhpe3d.utils import load_experiment_config, validate_mhr_asset_folder
@@ -227,12 +228,19 @@ def build_model_config(
 ) -> (
     Stage1MLPFusionConfig
     | Stage1ResidualFusionConfig
+    | Stage2JointResidualConfig
     | Stage2ParamRefineConfig
 ):
     model_kwargs = dict(config)
     model_name = str(model_kwargs.pop("name", "stage1_mlp_fusion"))
     model_kwargs.pop("_config_path", None)
+    if model_name == "stage2_joint_residual":
+        if args.disable_learn_betas:
+            model_kwargs["learn_betas"] = False
+        return Stage2JointResidualConfig(**model_kwargs)
     if model_name == "stage2_param_refine":
+        if args.disable_learn_betas:
+            model_kwargs["learn_betas"] = False
         return Stage2ParamRefineConfig(**model_kwargs)
     if args.disable_learn_betas:
         model_kwargs["learn_betas"] = False
@@ -245,10 +253,19 @@ def build_loss_config(
     config: dict[str, Any],
     args: argparse.Namespace,
     *,
-    model_config: Stage1MLPFusionConfig | Stage1ResidualFusionConfig | Stage2ParamRefineConfig,
+    model_config: (
+        Stage1MLPFusionConfig
+        | Stage1ResidualFusionConfig
+        | Stage2JointResidualConfig
+        | Stage2ParamRefineConfig
+    ),
 ) -> Stage1LossConfig | Stage2LossConfig:
     loss_kwargs = dict(config)
-    if isinstance(model_config, Stage2ParamRefineConfig):
+    if isinstance(model_config, (Stage2ParamRefineConfig, Stage2JointResidualConfig)):
+        if args.disable_learn_betas:
+            loss_kwargs["supervise_betas"] = False
+            loss_kwargs["betas_weight"] = 0.0
+            loss_kwargs["init_betas_weight"] = 0.0
         return Stage2LossConfig(**loss_kwargs)
     if args.disable_learn_betas:
         loss_kwargs["supervise_betas"] = False
@@ -259,9 +276,14 @@ def build_loss_config(
 def build_optimization_config(
     config: dict[str, Any],
     *,
-    model_config: Stage1MLPFusionConfig | Stage1ResidualFusionConfig | Stage2ParamRefineConfig,
+    model_config: (
+        Stage1MLPFusionConfig
+        | Stage1ResidualFusionConfig
+        | Stage2JointResidualConfig
+        | Stage2ParamRefineConfig
+    ),
 ) -> Stage1OptimizationConfig | Stage2OptimizationConfig:
-    if isinstance(model_config, Stage2ParamRefineConfig):
+    if isinstance(model_config, (Stage2ParamRefineConfig, Stage2JointResidualConfig)):
         return Stage2OptimizationConfig(**config)
     return Stage1OptimizationConfig(**config)
 
@@ -431,7 +453,7 @@ def build_lightning_module(
     data_config: Stage1DataConfig | Stage2DataConfig,
     args: argparse.Namespace,
 ):
-    if isinstance(model_config, Stage2ParamRefineConfig):
+    if isinstance(model_config, (Stage2ParamRefineConfig, Stage2JointResidualConfig)):
         return Stage2FusionLightningModule(
             model_config=model_config,
             loss_config=loss_config,
@@ -451,7 +473,7 @@ def build_lightning_module(
 def is_stage2_experiment(experiment: dict[str, Any]) -> bool:
     model_name = str(experiment.get("model", {}).get("name", ""))
     data_name = str(experiment.get("data", {}).get("name", ""))
-    return model_name == "stage2_param_refine" or data_name == "humman_stage2"
+    return model_name in {"stage2_param_refine", "stage2_joint_residual"} or data_name == "humman_stage2"
 
 
 if __name__ == "__main__":

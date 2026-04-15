@@ -1,0 +1,13 @@
+name: "stage2_joint_residual"
+learn_betas: true
+num_joints: 23
+pose_6d_dim: 138
+betas_dim: 10
+hidden_dim: 512
+latent_dim: 512
+joint_latent_dim: 256
+encoder_layers: 3
+proposal_layers: 3
+weight_head_layers: 2
+refinement_layers: 3
+dropout: 0.1
