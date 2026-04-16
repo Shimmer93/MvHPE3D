@@ -1,10 +1,10 @@
-name: "stage2_cross_camera_joint_residual"
+name: "stage2_cross_camera_joint_graph_refiner"
 
 data:
   config: "configs/data/humman_stage2.yaml"
 
 model:
-  config: "configs/model/stage2_joint_residual.yaml"
+  config: "configs/model/stage2_joint_graph_refiner.yaml"
 
 loss:
   pose_6d_weight: 1.0

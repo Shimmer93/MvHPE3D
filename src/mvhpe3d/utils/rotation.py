@@ -48,15 +48,17 @@ def rotation_6d_to_matrix(rotation_6d: torch.Tensor) -> torch.Tensor:
         raise ValueError(
             f"Expected rotation_6d trailing dimension 6, got {tuple(rotation_6d.shape)}"
         )
+    original_dtype = rotation_6d.dtype
+    rotation_6d = rotation_6d.float()
     first_raw = rotation_6d[..., 0:3]
     second_raw = rotation_6d[..., 3:6]
 
-    first_basis = F.normalize(first_raw, dim=-1)
+    first_basis = F.normalize(first_raw, dim=-1, eps=1e-6)
     second_basis = second_raw - (first_basis * second_raw).sum(dim=-1, keepdim=True) * first_basis
-    second_basis = F.normalize(second_basis, dim=-1)
+    second_basis = F.normalize(second_basis, dim=-1, eps=1e-6)
     third_basis = torch.cross(first_basis, second_basis, dim=-1)
 
-    return torch.stack((first_basis, second_basis, third_basis), dim=-1)
+    return torch.stack((first_basis, second_basis, third_basis), dim=-1).to(original_dtype)
 
 
 def matrix_to_axis_angle(rotation_matrix: torch.Tensor) -> torch.Tensor:
@@ -66,6 +68,8 @@ def matrix_to_axis_angle(rotation_matrix: torch.Tensor) -> torch.Tensor:
             "Expected rotation_matrix trailing shape (3, 3), "
             f"got {tuple(rotation_matrix.shape)}"
         )
+    original_dtype = rotation_matrix.dtype
+    rotation_matrix = rotation_matrix.float()
 
     trace = rotation_matrix[..., 0, 0] + rotation_matrix[..., 1, 1] + rotation_matrix[..., 2, 2]
     cosine = ((trace - 1.0) * 0.5).clamp(min=-1.0, max=1.0)
@@ -86,7 +90,7 @@ def matrix_to_axis_angle(rotation_matrix: torch.Tensor) -> torch.Tensor:
 
     small_angle = angle.abs() < 1e-4
     first_order = 0.5 * vee
-    return torch.where(small_angle.unsqueeze(-1), first_order, axis_angle)
+    return torch.where(small_angle.unsqueeze(-1), first_order, axis_angle).to(original_dtype)
 
 
 def axis_angle_to_rotation_6d(axis_angle: torch.Tensor) -> torch.Tensor:

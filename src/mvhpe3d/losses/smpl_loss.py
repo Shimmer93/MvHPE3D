@@ -57,6 +57,7 @@ class Stage2LossConfig:
     pose_6d_weight: float = 1.0
     betas_weight: float = 0.1
     joint_weight: float = 1.0
+    articulation_weight: float = 0.0
     init_pose_6d_weight: float = 0.25
     init_betas_weight: float = 0.025
     supervise_betas: bool = True

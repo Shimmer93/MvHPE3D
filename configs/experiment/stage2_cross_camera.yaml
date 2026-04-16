@@ -10,6 +10,7 @@ loss:
   pose_6d_weight: 1.0
   betas_weight: 0.1
   joint_weight: 1.0
+  articulation_weight: 0.2
   init_pose_6d_weight: 0.25
   init_betas_weight: 0.025
 

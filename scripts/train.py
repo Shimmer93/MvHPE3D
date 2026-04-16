@@ -30,6 +30,7 @@ from mvhpe3d.losses import Stage1LossConfig, Stage2LossConfig
 from mvhpe3d.models import (
     Stage1MLPFusionConfig,
     Stage1ResidualFusionConfig,
+    Stage2JointGraphRefinerConfig,
     Stage2JointResidualConfig,
     Stage2ParamRefineConfig,
 )
@@ -77,7 +78,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--default-root-dir",
         type=str,
-        default="outputs/stage1",
+        default=None,
         help="Trainer default root dir for checkpoints and logs",
     )
     parser.add_argument(
@@ -228,12 +229,17 @@ def build_model_config(
 ) -> (
     Stage1MLPFusionConfig
     | Stage1ResidualFusionConfig
+    | Stage2JointGraphRefinerConfig
     | Stage2JointResidualConfig
     | Stage2ParamRefineConfig
 ):
     model_kwargs = dict(config)
     model_name = str(model_kwargs.pop("name", "stage1_mlp_fusion"))
     model_kwargs.pop("_config_path", None)
+    if model_name == "stage2_joint_graph_refiner":
+        if args.disable_learn_betas:
+            model_kwargs["learn_betas"] = False
+        return Stage2JointGraphRefinerConfig(**model_kwargs)
     if model_name == "stage2_joint_residual":
         if args.disable_learn_betas:
             model_kwargs["learn_betas"] = False
@@ -256,12 +262,16 @@ def build_loss_config(
     model_config: (
         Stage1MLPFusionConfig
         | Stage1ResidualFusionConfig
+        | Stage2JointGraphRefinerConfig
         | Stage2JointResidualConfig
         | Stage2ParamRefineConfig
     ),
 ) -> Stage1LossConfig | Stage2LossConfig:
     loss_kwargs = dict(config)
-    if isinstance(model_config, (Stage2ParamRefineConfig, Stage2JointResidualConfig)):
+    if isinstance(
+        model_config,
+        (Stage2ParamRefineConfig, Stage2JointResidualConfig, Stage2JointGraphRefinerConfig),
+    ):
         if args.disable_learn_betas:
             loss_kwargs["supervise_betas"] = False
             loss_kwargs["betas_weight"] = 0.0
@@ -279,11 +289,15 @@ def build_optimization_config(
     model_config: (
         Stage1MLPFusionConfig
         | Stage1ResidualFusionConfig
+        | Stage2JointGraphRefinerConfig
         | Stage2JointResidualConfig
         | Stage2ParamRefineConfig
     ),
 ) -> Stage1OptimizationConfig | Stage2OptimizationConfig:
-    if isinstance(model_config, (Stage2ParamRefineConfig, Stage2JointResidualConfig)):
+    if isinstance(
+        model_config,
+        (Stage2ParamRefineConfig, Stage2JointResidualConfig, Stage2JointGraphRefinerConfig),
+    ):
         return Stage2OptimizationConfig(**config)
     return Stage1OptimizationConfig(**config)
 
@@ -309,7 +323,7 @@ def build_trainer_config(
     if args.fast_dev_run:
         trainer_kwargs["fast_dev_run"] = True
 
-    root_dir = Path(args.default_root_dir).resolve()
+    root_dir = resolve_default_root_dir(args, experiment_name=experiment_name)
     logger = build_loggers(root_dir=root_dir, experiment_name=experiment_name)
     csv_logger = logger[0] if isinstance(logger, list) else logger
     checkpoint = ModelCheckpoint(
@@ -326,6 +340,14 @@ def build_trainer_config(
     trainer_kwargs["callbacks"] = [checkpoint]
     trainer_kwargs["inference_mode"] = False
     return trainer_kwargs
+
+
+def resolve_default_root_dir(args: argparse.Namespace, *, experiment_name: str) -> Path:
+    if args.default_root_dir is not None:
+        return Path(args.default_root_dir).resolve()
+    if "stage2" in experiment_name.lower():
+        return Path("outputs/stage2").resolve()
+    return Path("outputs/stage1").resolve()
 
 
 def build_loggers(root_dir: Path, experiment_name: str) -> Logger | list[Logger]:
@@ -453,7 +475,10 @@ def build_lightning_module(
     data_config: Stage1DataConfig | Stage2DataConfig,
     args: argparse.Namespace,
 ):
-    if isinstance(model_config, (Stage2ParamRefineConfig, Stage2JointResidualConfig)):
+    if isinstance(
+        model_config,
+        (Stage2ParamRefineConfig, Stage2JointResidualConfig, Stage2JointGraphRefinerConfig),
+    ):
         return Stage2FusionLightningModule(
             model_config=model_config,
             loss_config=loss_config,
@@ -473,7 +498,11 @@ def build_lightning_module(
 def is_stage2_experiment(experiment: dict[str, Any]) -> bool:
     model_name = str(experiment.get("model", {}).get("name", ""))
     data_name = str(experiment.get("data", {}).get("name", ""))
-    return model_name in {"stage2_param_refine", "stage2_joint_residual"} or data_name == "humman_stage2"
+    return model_name in {
+        "stage2_param_refine",
+        "stage2_joint_residual",
+        "stage2_joint_graph_refiner",
+    } or data_name == "humman_stage2"
 
 
 if __name__ == "__main__":

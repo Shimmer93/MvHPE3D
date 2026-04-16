@@ -14,6 +14,8 @@ from mvhpe3d.lightning import Stage1FusionLightningModule, Stage2FusionLightning
 from mvhpe3d.models import (
     Stage1MLPFusionConfig,
     Stage1MLPFusionModel,
+    Stage2JointGraphRefinerConfig,
+    Stage2JointGraphRefinerModel,
     Stage2JointResidualConfig,
     Stage2JointResidualModel,
     Stage2ParamRefineConfig,
@@ -71,6 +73,17 @@ def test_stage2_model_forward_shapes() -> None:
 
 def test_stage2_joint_residual_model_forward_shapes() -> None:
     model = Stage2JointResidualModel(Stage2JointResidualConfig())
+    outputs = model.forward(__import__("torch").zeros(2, 3, 148))
+
+    assert tuple(outputs["init_pose_6d"].shape) == (2, 23, 6)
+    assert tuple(outputs["pred_body_pose"].shape) == (2, 69)
+    assert tuple(outputs["pred_betas"].shape) == (2, 10)
+    assert tuple(outputs["view_weights"].shape) == (2, 3)
+    assert tuple(outputs["pose_view_weights"].shape) == (2, 3, 23)
+
+
+def test_stage2_joint_graph_refiner_model_forward_shapes() -> None:
+    model = Stage2JointGraphRefinerModel(Stage2JointGraphRefinerConfig())
     outputs = model.forward(__import__("torch").zeros(2, 3, 148))
 
     assert tuple(outputs["init_pose_6d"].shape) == (2, 23, 6)
@@ -182,6 +195,16 @@ def test_load_stage2_joint_residual_experiment_config_resolves_sections() -> Non
     assert experiment["experiment_name"] == "stage2_cross_camera_joint_residual"
     assert experiment["data"]["name"] == "humman_stage2"
     assert experiment["model"]["name"] == "stage2_joint_residual"
+
+
+def test_load_stage2_joint_graph_refiner_experiment_config_resolves_sections() -> None:
+    experiment = load_experiment_config(
+        "configs/experiment/stage2_cross_camera_joint_graph_refiner.yaml"
+    )
+
+    assert experiment["experiment_name"] == "stage2_cross_camera_joint_graph_refiner"
+    assert experiment["data"]["name"] == "humman_stage2"
+    assert experiment["model"]["name"] == "stage2_joint_graph_refiner"
 
 
 def test_stage1_lightning_module_validation_step_adds_joint_metrics(

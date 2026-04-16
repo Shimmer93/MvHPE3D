@@ -9,8 +9,16 @@ import torch
 import torch.nn.functional as F
 
 from mvhpe3d.losses import Stage2Loss, Stage2LossConfig
-from mvhpe3d.metrics import SMPL_EVAL_NUM_JOINTS, batch_mpjpe, batch_pa_mpjpe, root_center_joints
+from mvhpe3d.metrics import (
+    SMPL_EVAL_NUM_JOINTS,
+    batch_mpjpe,
+    batch_pa_mpjpe,
+    batch_similarity_align,
+    root_center_joints,
+)
 from mvhpe3d.models import (
+    Stage2JointGraphRefinerConfig,
+    Stage2JointGraphRefinerModel,
     Stage2JointResidualConfig,
     Stage2JointResidualModel,
     Stage2ParamRefineConfig,
@@ -35,7 +43,9 @@ class Stage2FusionLightningModule(L.LightningModule):
     def __init__(
         self,
         *,
-        model_config: Stage2JointResidualConfig | Stage2ParamRefineConfig | dict | None = None,
+        model_config: (
+            Stage2JointGraphRefinerConfig | Stage2JointResidualConfig | Stage2ParamRefineConfig | dict | None
+        ) = None,
         loss_config: Stage2LossConfig | dict | None = None,
         optimization_config: Stage2OptimizationConfig | dict | None = None,
         smpl_model_path: str | None = None,
@@ -123,7 +133,14 @@ class Stage2FusionLightningModule(L.LightningModule):
         )
 
     def _shared_step(self, batch, *, stage: str) -> dict[str, torch.Tensor]:
+        self._assert_finite_tensor("batch/views_input", batch["views_input"])
+        self._assert_finite_tensor("batch/target_body_pose_6d", batch["target_body_pose_6d"])
+        self._assert_finite_tensor("batch/target_betas", batch["target_betas"])
+        self._assert_finite_tensor("batch/target_body_pose", batch["target_body_pose"])
         predictions = self(batch["views_input"])
+        for name, value in predictions.items():
+            if torch.is_tensor(value):
+                self._assert_finite_tensor(f"predictions/{name}", value)
         losses = self.criterion(
             pred_pose_6d=predictions["pred_pose_6d"],
             pred_betas=predictions["pred_betas"],
@@ -132,13 +149,24 @@ class Stage2FusionLightningModule(L.LightningModule):
             init_pose_6d=predictions["init_pose_6d"],
             init_betas=predictions["init_betas"],
         )
-        joint_loss = self._compute_canonical_joint_loss(
+        for name, value in losses.items():
+            self._assert_finite_tensor(f"losses/{name}", value)
+        pred_joints, target_joints = self._build_canonical_joint_pair(
             pred_body_pose=predictions["pred_body_pose"],
             pred_betas=predictions["pred_betas"],
             target_body_pose=batch["target_body_pose"],
             target_betas=batch["target_betas"],
         )
-        total_loss = losses["loss"] + self.loss_config.joint_weight * joint_loss
+        joint_loss = F.mse_loss(pred_joints, target_joints)
+        self._assert_finite_tensor("losses/joint_loss", joint_loss)
+        articulation_loss = self._compute_articulation_loss(pred_joints=pred_joints, target_joints=target_joints)
+        self._assert_finite_tensor("losses/articulation_loss", articulation_loss)
+        total_loss = (
+            losses["loss"]
+            + self.loss_config.joint_weight * joint_loss
+            + self.loss_config.articulation_weight * articulation_loss
+        )
+        self._assert_finite_tensor("losses/total_loss", total_loss)
         metrics = {
             f"{stage}/loss": total_loss,
             f"{stage}/loss_pose_6d": losses["loss_pose_6d"],
@@ -146,6 +174,7 @@ class Stage2FusionLightningModule(L.LightningModule):
             f"{stage}/loss_init_pose_6d": losses["loss_init_pose_6d"],
             f"{stage}/loss_init_betas": losses["loss_init_betas"],
             f"{stage}/loss_joints": joint_loss,
+            f"{stage}/loss_articulation": articulation_loss,
         }
 
         if stage in {"val", "test"}:
@@ -163,14 +192,14 @@ class Stage2FusionLightningModule(L.LightningModule):
             )
         return metrics
 
-    def _compute_canonical_joint_loss(
+    def _build_canonical_joint_pair(
         self,
         *,
         pred_body_pose: torch.Tensor,
         pred_betas: torch.Tensor,
         target_body_pose: torch.Tensor,
         target_betas: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_size = pred_body_pose.shape[0]
         zero_root = torch.zeros(
             (batch_size, 3),
@@ -193,6 +222,22 @@ class Stage2FusionLightningModule(L.LightningModule):
                 global_orient=zero_root,
                 transl=zero_transl,
             )
+        )
+        return pred_joints, target_joints
+
+    def _compute_canonical_joint_loss(
+        self,
+        *,
+        pred_body_pose: torch.Tensor,
+        pred_betas: torch.Tensor,
+        target_body_pose: torch.Tensor,
+        target_betas: torch.Tensor,
+    ) -> torch.Tensor:
+        pred_joints, target_joints = self._build_canonical_joint_pair(
+            pred_body_pose=pred_body_pose,
+            pred_betas=pred_betas,
+            target_body_pose=target_body_pose,
+            target_betas=target_betas,
         )
         return F.mse_loss(pred_joints, target_joints)
 
@@ -204,33 +249,30 @@ class Stage2FusionLightningModule(L.LightningModule):
         target_body_pose: torch.Tensor,
         target_betas: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        batch_size = pred_body_pose.shape[0]
-        zero_root = torch.zeros(
-            (batch_size, 3),
-            dtype=pred_body_pose.dtype,
-            device=pred_body_pose.device,
-        )
-        zero_transl = torch.zeros_like(zero_root)
-        pred_joints = root_center_joints(
-            self._build_smpl_joints(
-                body_pose=pred_body_pose,
-                betas=pred_betas,
-                global_orient=zero_root,
-                transl=zero_transl,
-            )
-        )
-        target_joints = root_center_joints(
-            self._build_smpl_joints(
-                body_pose=target_body_pose,
-                betas=target_betas,
-                global_orient=zero_root,
-                transl=zero_transl,
-            )
+        pred_joints, target_joints = self._build_canonical_joint_pair(
+            pred_body_pose=pred_body_pose,
+            pred_betas=pred_betas,
+            target_body_pose=target_body_pose,
+            target_betas=target_betas,
         )
         return {
             "mpjpe": batch_mpjpe(pred_joints, target_joints).mean(),
             "pa_mpjpe": batch_pa_mpjpe(pred_joints, target_joints).mean(),
         }
+
+    def _compute_articulation_loss(
+        self,
+        *,
+        pred_joints: torch.Tensor,
+        target_joints: torch.Tensor,
+    ) -> torch.Tensor:
+        with torch.autocast(device_type=pred_joints.device.type, enabled=False):
+            aligned_pred = batch_similarity_align(
+                pred_joints.float(),
+                target_joints.float(),
+            )
+            articulation_loss = F.mse_loss(aligned_pred, target_joints.float())
+        return articulation_loss.to(pred_joints.dtype)
 
     def _build_smpl_joints(
         self,
@@ -297,6 +339,20 @@ class Stage2FusionLightningModule(L.LightningModule):
             sync_dist=sync_dist,
         )
 
+    def _assert_finite_tensor(self, name: str, tensor: torch.Tensor) -> None:
+        if torch.isfinite(tensor).all():
+            return
+        detached = tensor.detach()
+        nonfinite_mask = ~torch.isfinite(detached)
+        bad_count = int(nonfinite_mask.sum().item())
+        min_value = float(detached[torch.isfinite(detached)].min().item()) if torch.isfinite(detached).any() else float("nan")
+        max_value = float(detached[torch.isfinite(detached)].max().item()) if torch.isfinite(detached).any() else float("nan")
+        raise RuntimeError(
+            f"Non-finite tensor detected at {name}: "
+            f"shape={tuple(detached.shape)}, bad_count={bad_count}, "
+            f"finite_min={min_value}, finite_max={max_value}"
+        )
+
 
 def _coerce_dataclass_config(value, config_type):
     if value is None:
@@ -311,20 +367,28 @@ def _coerce_dataclass_config(value, config_type):
 def _coerce_stage2_model_config(value):
     if value is None:
         return Stage2ParamRefineConfig()
-    if isinstance(value, (Stage2ParamRefineConfig, Stage2JointResidualConfig)):
+    if isinstance(
+        value,
+        (Stage2ParamRefineConfig, Stage2JointResidualConfig, Stage2JointGraphRefinerConfig),
+    ):
         return value
     if isinstance(value, dict):
         model_name = str(value.get("name", "stage2_param_refine"))
+        if model_name == "stage2_joint_graph_refiner":
+            return Stage2JointGraphRefinerConfig(**value)
         if model_name == "stage2_joint_residual":
             return Stage2JointResidualConfig(**value)
         return Stage2ParamRefineConfig(**value)
     raise TypeError(
-        "Expected Stage2JointResidualConfig, Stage2ParamRefineConfig, dict, or None; "
+        "Expected Stage2JointGraphRefinerConfig, Stage2JointResidualConfig, "
+        "Stage2ParamRefineConfig, dict, or None; "
         f"got {type(value)!r}"
     )
 
 
 def _build_stage2_model(config):
+    if isinstance(config, Stage2JointGraphRefinerConfig):
+        return Stage2JointGraphRefinerModel(config)
     if isinstance(config, Stage2JointResidualConfig):
         return Stage2JointResidualModel(config)
     return Stage2ParamRefineModel(config)
