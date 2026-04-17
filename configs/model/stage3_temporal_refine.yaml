@@ -1,0 +1,12 @@
+name: "stage3_temporal_refine"
+backbone_name: "stage2_joint_graph_refiner"
+learn_betas: false
+hidden_dim: 512
+temporal_dim: 256
+temporal_layers: 3
+temporal_kernel_size: 3
+head_layers: 3
+dropout: 0.1
+pose_residual_scale: 0.1
+betas_residual_scale: 0.05
+freeze_backbone: true

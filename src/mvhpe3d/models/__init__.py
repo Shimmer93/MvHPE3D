@@ -14,6 +14,7 @@ from .stage2 import (
     Stage2ParamRefineConfig,
     Stage2ParamRefineModel,
 )
+from .stage3 import Stage3TemporalRefineConfig, Stage3TemporalRefineModel
 
 __all__ = [
     "Stage1MLPFusionConfig",
@@ -26,4 +27,6 @@ __all__ = [
     "Stage2JointResidualModel",
     "Stage2ParamRefineConfig",
     "Stage2ParamRefineModel",
+    "Stage3TemporalRefineConfig",
+    "Stage3TemporalRefineModel",
 ]

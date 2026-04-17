@@ -3,18 +3,23 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
+
 from mvhpe3d.data import (
     Stage1DataConfig,
     Stage1HuMManDataModule,
     Stage2DataConfig,
     Stage2HuMManDataModule,
+    Stage3DataConfig,
+    Stage3HuMManDataModule,
 )
-from mvhpe3d.data.datasets import HuMManStage1Dataset, HuMManStage2Dataset
+from mvhpe3d.data.datasets import HuMManStage1Dataset, HuMManStage2Dataset, HuMManStage3Dataset
 from mvhpe3d.data.splits import (
     filter_records_by_split,
     load_sample_records,
     resolve_split_records,
 )
+from mvhpe3d.utils import cache_path_for_source_npz
 
 
 def test_load_sample_records_and_filter_by_split(sample_manifest: Path) -> None:
@@ -130,6 +135,107 @@ def test_stage2_datamodule_builds_train_val_and_test_batches(
     assert tuple(val_batch["views_input"].shape) == (1, 2, 148)
     assert tuple(test_batch["views_input"].shape) == (1, 2, 148)
     assert tuple(train_batch["target_body_pose_6d"].shape) == (1, 23, 6)
+
+
+def test_stage3_dataset_uses_only_cameras_shared_across_window(tmp_path: Path) -> None:
+    cameras_all = ["kinect_000", "kinect_001", "kinect_002"]
+    gt_smpl_dir = tmp_path / "smpl"
+    gt_smpl_dir.mkdir()
+    cameras_dir = tmp_path / "cameras"
+    cameras_dir.mkdir()
+
+    for camera_id in cameras_all:
+        np.savez(
+            tmp_path / f"{camera_id}.npz",
+            mhr_model_params=np.zeros(204, dtype=np.float32),
+            shape_params=np.zeros(45, dtype=np.float32),
+            pred_cam_t=np.array([0.1, 0.2, 2.0], dtype=np.float32),
+            cam_int=np.eye(3, dtype=np.float32),
+            image_size=np.array([224, 224], dtype=np.float32),
+        )
+
+    np.savez(
+        gt_smpl_dir / "seq_shared_smpl_params.npz",
+        global_orient=np.zeros((3, 3), dtype=np.float32),
+        body_pose=np.zeros((3, 69), dtype=np.float32),
+        betas=np.zeros((3, 10), dtype=np.float32),
+        transl=np.zeros((3, 3), dtype=np.float32),
+    )
+    camera_payload = {
+        f"kinect_color_{camera_id.split('_', maxsplit=1)[1]}": {
+            "K": [[100.0, 0.0, 112.0], [0.0, 100.0, 112.0], [0.0, 0.0, 1.0]],
+            "R": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            "T": [0.0, 0.0, 0.0],
+        }
+        for camera_id in cameras_all
+    }
+    (cameras_dir / "seq_shared_cameras.json").write_text(json.dumps(camera_payload), encoding="utf-8")
+
+    samples = [
+        {
+            "sample_id": "seq_shared_frame_1",
+            "sequence_id": "seq_shared",
+            "frame_id": "000001",
+            "split": "train",
+            "views": [
+                {"camera_id": "kinect_000", "npz_path": str(tmp_path / "kinect_000.npz")},
+                {"camera_id": "kinect_001", "npz_path": str(tmp_path / "kinect_001.npz")},
+                {"camera_id": "kinect_002", "npz_path": str(tmp_path / "kinect_002.npz")},
+            ],
+        },
+        {
+            "sample_id": "seq_shared_frame_2",
+            "sequence_id": "seq_shared",
+            "frame_id": "000002",
+            "split": "train",
+            "views": [
+                {"camera_id": "kinect_000", "npz_path": str(tmp_path / "kinect_000.npz")},
+                {"camera_id": "kinect_001", "npz_path": str(tmp_path / "kinect_001.npz")},
+            ],
+        },
+        {
+            "sample_id": "seq_shared_frame_3",
+            "sequence_id": "seq_shared",
+            "frame_id": "000003",
+            "split": "train",
+            "views": [
+                {"camera_id": "kinect_000", "npz_path": str(tmp_path / "kinect_000.npz")},
+                {"camera_id": "kinect_001", "npz_path": str(tmp_path / "kinect_001.npz")},
+                {"camera_id": "kinect_002", "npz_path": str(tmp_path / "kinect_002.npz")},
+            ],
+        },
+    ]
+    manifest_path = tmp_path / "stage3_manifest.json"
+    manifest_path.write_text(json.dumps({"samples": samples}), encoding="utf-8")
+
+    cache_dir = tmp_path / "sam3dbody_fitted_smpl"
+    cache_dir.mkdir()
+    for camera_id in cameras_all:
+        cache_path = cache_path_for_source_npz(cache_dir, tmp_path / f"{camera_id}.npz")
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(
+            cache_path,
+            body_pose=np.zeros(69, dtype=np.float32),
+            betas=np.zeros(10, dtype=np.float32),
+            global_orient=np.zeros(3, dtype=np.float32),
+            transl=np.zeros(3, dtype=np.float32),
+        )
+
+    records = filter_records_by_split(load_sample_records(manifest_path), "train")
+    dataset = HuMManStage3Dataset(
+        records,
+        num_views=2,
+        train=False,
+        gt_smpl_dir=gt_smpl_dir,
+        cameras_dir=cameras_dir,
+        input_smpl_cache_dir=cache_dir,
+        window_size=3,
+    )
+
+    sample = dataset[1]
+
+    assert tuple(sample["views_input"].shape) == (3, 2, 148)
+    assert sample["meta"]["camera_ids"] == ["kinect_000", "kinect_001"]
 
 
 def test_resolve_split_records_filters_views_by_named_policy(

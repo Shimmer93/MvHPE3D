@@ -47,6 +47,8 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
         )
         self.input_smpl_cache_dir = Path(input_smpl_cache_dir).resolve()
         self._input_smpl_cache: dict[str, dict[str, np.ndarray]] = {}
+        self._stage2_input_cache: dict[str, np.ndarray] = {}
+        self._canonical_target_cache: dict[tuple[str, str], dict[str, np.ndarray]] = {}
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         record = self.records[index]
@@ -74,10 +76,7 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
             camera_ids.append(view.camera_id)
 
         target_payload = self._load_gt_target(record)
-        canonical_target = canonicalize_stage2_target(
-            smpl_body_pose=self._require_field(target_payload, "body_pose", expected_last_dim=69),
-            smpl_betas=self._require_field(target_payload, "betas", expected_last_dim=10),
-        )
+        canonical_target = self._load_canonical_target(record)
         camera_target_aux = self._build_camera_frame_target_aux(
             record=record,
             camera_ids=camera_ids,
@@ -131,15 +130,37 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
         return cached
 
     def _build_stage2_input(self, payload: dict[str, np.ndarray]) -> np.ndarray:
+        cached_input = payload.get("_stage2_input_cached")
+        if cached_input is not None:
+            return np.asarray(cached_input, dtype=np.float32)
         body_pose = self._require_field(payload, "body_pose", expected_last_dim=69)
         betas = self._require_field(payload, "betas", expected_last_dim=10)
-        body_pose_6d = axis_angle_to_rotation_6d(
-            torch.from_numpy(body_pose.reshape(-1, 3))
-        ).reshape(-1)
-        return np.concatenate(
+        body_pose_6d = payload.get("body_pose_6d")
+        if body_pose_6d is None:
+            body_pose_6d = axis_angle_to_rotation_6d(
+                torch.from_numpy(body_pose.reshape(-1, 3))
+            ).reshape(-1).cpu().numpy()
+            payload["body_pose_6d"] = np.ascontiguousarray(body_pose_6d.astype(np.float32, copy=False))
+        built_input = np.concatenate(
             [
-                body_pose_6d.cpu().numpy().astype(np.float32, copy=False),
+                np.asarray(body_pose_6d, dtype=np.float32),
                 betas,
             ],
             axis=-1,
         ).astype(np.float32, copy=False)
+        payload["_stage2_input_cached"] = built_input
+        return built_input
+
+    def _load_canonical_target(self, record) -> dict[str, np.ndarray]:
+        cache_key = (record.sequence_id, record.frame_id)
+        cached = self._canonical_target_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        target_payload = self._load_gt_target(record)
+        cached = canonicalize_stage2_target(
+            smpl_body_pose=self._require_field(target_payload, "body_pose", expected_last_dim=69),
+            smpl_betas=self._require_field(target_payload, "betas", expected_last_dim=10),
+        )
+        self._canonical_target_cache[cache_key] = cached
+        return cached

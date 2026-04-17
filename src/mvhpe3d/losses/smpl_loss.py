@@ -102,3 +102,45 @@ class Stage2Loss(nn.Module):
             "loss_init_pose_6d": init_pose_6d_loss,
             "loss_init_betas": init_betas_loss,
         }
+
+
+@dataclass(slots=True)
+class Stage3LossConfig:
+    """Weights for the Stage 3 temporal refinement objective."""
+
+    pose_6d_weight: float = 1.0
+    betas_weight: float = 0.1
+    joint_weight: float = 1.0
+    articulation_weight: float = 0.0
+    supervise_betas: bool = True
+
+
+class Stage3Loss(nn.Module):
+    """Weighted losses over center-frame temporally refined SMPL parameters."""
+
+    def __init__(self, config: Stage3LossConfig) -> None:
+        super().__init__()
+        self.config = config
+
+    def forward(
+        self,
+        *,
+        pred_pose_6d: torch.Tensor,
+        pred_betas: torch.Tensor,
+        target_pose_6d: torch.Tensor,
+        target_betas: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        pose_6d_loss = F.mse_loss(pred_pose_6d, target_pose_6d)
+        if self.config.supervise_betas:
+            betas_loss = F.mse_loss(pred_betas, target_betas)
+        else:
+            betas_loss = pose_6d_loss.new_zeros(())
+        total_loss = (
+            self.config.pose_6d_weight * pose_6d_loss
+            + self.config.betas_weight * betas_loss
+        )
+        return {
+            "loss": total_loss,
+            "loss_pose_6d": pose_6d_loss,
+            "loss_betas": betas_loss,
+        }

@@ -9,8 +9,14 @@ from mvhpe3d.data import (
     Stage1HuMManDataModule,
     Stage2DataConfig,
     Stage2HuMManDataModule,
+    Stage3DataConfig,
+    Stage3HuMManDataModule,
 )
-from mvhpe3d.lightning import Stage1FusionLightningModule, Stage2FusionLightningModule
+from mvhpe3d.lightning import (
+    Stage1FusionLightningModule,
+    Stage2FusionLightningModule,
+    Stage3TemporalLightningModule,
+)
 from mvhpe3d.models import (
     Stage1MLPFusionConfig,
     Stage1MLPFusionModel,
@@ -20,6 +26,8 @@ from mvhpe3d.models import (
     Stage2JointResidualModel,
     Stage2ParamRefineConfig,
     Stage2ParamRefineModel,
+    Stage3TemporalRefineConfig,
+    Stage3TemporalRefineModel,
 )
 from mvhpe3d.utils import load_experiment_config
 
@@ -91,6 +99,20 @@ def test_stage2_joint_graph_refiner_model_forward_shapes() -> None:
     assert tuple(outputs["pred_betas"].shape) == (2, 10)
     assert tuple(outputs["view_weights"].shape) == (2, 3)
     assert tuple(outputs["pose_view_weights"].shape) == (2, 3, 23)
+
+
+def test_stage3_temporal_refine_model_forward_shapes() -> None:
+    model = Stage3TemporalRefineModel(Stage3TemporalRefineConfig())
+    outputs = model.forward(
+        __import__("torch").zeros(2, 3, 286),
+        base_pose_6d=__import__("torch").zeros(2, 138),
+        base_betas=__import__("torch").zeros(2, 10),
+    )
+
+    assert tuple(outputs["base_pose_6d"].shape) == (2, 23, 6)
+    assert tuple(outputs["pred_pose_6d"].shape) == (2, 23, 6)
+    assert tuple(outputs["pred_body_pose"].shape) == (2, 69)
+    assert tuple(outputs["pred_betas"].shape) == (2, 10)
 
 
 def test_stage2_lightning_module_training_step(
@@ -181,6 +203,38 @@ def test_stage2_lightning_module_disabling_betas_zeros_beta_losses(
     assert metrics["train/loss_init_betas"].item() == 0.0
 
 
+
+
+def test_stage3_lightning_module_training_step(
+    sample_manifest: Path,
+    sample_input_smpl_cache: Path,
+) -> None:
+    datamodule = Stage3HuMManDataModule(
+        Stage3DataConfig(
+            manifest_path=str(sample_manifest),
+            input_smpl_cache_dir=str(sample_input_smpl_cache),
+            num_views=2,
+            window_size=3,
+            batch_size=1,
+            drop_last_train=False,
+        )
+    )
+    datamodule.setup("fit")
+    batch = next(iter(datamodule.train_dataloader()))
+
+    module = Stage3TemporalLightningModule(
+        model_config=Stage3TemporalRefineConfig(),
+        stage2_backbone_model=Stage2JointResidualModel(Stage2JointResidualConfig()),
+    )
+    monkeypatch_torch = __import__("torch")
+    dummy_joints = monkeypatch_torch.zeros(1, 24, 3)
+    module._runtime_cache["smpl_eval_model"] = lambda **_: None
+    module._build_smpl_joints = lambda **_: dummy_joints
+    loss = module.training_step(batch, 0)
+
+    assert loss.ndim == 0
+
+
 def test_load_stage2_experiment_config_resolves_sections() -> None:
     experiment = load_experiment_config("configs/experiment/stage2_cross_camera.yaml")
 
@@ -205,6 +259,14 @@ def test_load_stage2_joint_graph_refiner_experiment_config_resolves_sections() -
     assert experiment["experiment_name"] == "stage2_cross_camera_joint_graph_refiner"
     assert experiment["data"]["name"] == "humman_stage2"
     assert experiment["model"]["name"] == "stage2_joint_graph_refiner"
+
+
+def test_load_stage3_experiment_config_resolves_sections() -> None:
+    experiment = load_experiment_config("configs/experiment/stage3_temporal_refine.yaml")
+
+    assert experiment["experiment_name"] == "stage3_temporal_refine"
+    assert experiment["data"]["name"] == "humman_stage3"
+    assert experiment["model"]["name"] == "stage3_temporal_refine"
 
 
 def test_stage1_lightning_module_validation_step_adds_joint_metrics(
