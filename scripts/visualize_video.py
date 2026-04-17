@@ -50,6 +50,7 @@ from mvhpe3d.utils import (
     validate_mhr_asset_folder,
 )
 from mvhpe3d.visualization import (
+    correct_camera_global_orient_using_torso,
     load_camera_parameters,
     resolve_rgb_image_path,
 )
@@ -210,8 +211,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--pred-camera-mode",
         type=str,
-        choices=("input", "gt"),
-        default="input",
+        choices=("input", "input_corrected", "gt"),
+        default="gt",
         help="Camera/root placement used for prediction overlays",
     )
     parser.add_argument(
@@ -899,6 +900,14 @@ def build_video_frame(
         global_orient=gt_world_global_orient,
         transl=gt_world_transl,
     )
+    canonical_pred_joints = build_smpl_outputs(
+        smpl_model=smpl_model,
+        device=device,
+        body_pose=pred_body_pose,
+        betas=pred_betas,
+        global_orient=np.zeros(3, dtype=np.float32),
+        transl=np.zeros(3, dtype=np.float32),
+    )[1]
     view_panels: list[np.ndarray] = []
     per_view_summary: list[dict[str, Any]] = []
     reference_image_path = resolve_rgb_image_path(
@@ -918,6 +927,7 @@ def build_video_frame(
         (75, 195, 245),
     )
     fixed_view_meshes: list[tuple[str, np.ndarray, np.ndarray, tuple[int, int, int]]] = []
+    canonical_input_joints_per_view: list[np.ndarray] = []
     for view_index, camera_id in enumerate(meta["camera_ids"]):
         input_vertices_camera, input_joints_camera = build_smpl_outputs(
             smpl_model=smpl_model,
@@ -941,6 +951,16 @@ def build_video_frame(
             vertices_camera=input_joints_camera,
             rotation=camera.rotation,
             translation=camera.translation,
+        )
+        canonical_input_joints_per_view.append(
+            build_smpl_outputs(
+                smpl_model=smpl_model,
+                device=device,
+                body_pose=input_body_pose[view_index],
+                betas=input_betas[view_index],
+                global_orient=np.zeros(3, dtype=np.float32),
+                transl=np.zeros(3, dtype=np.float32),
+            )[1]
         )
         fixed_view_meshes.append(
             (
@@ -1017,6 +1037,25 @@ def build_video_frame(
             )
             pred_overlay_intrinsics = gt_camera.intrinsics
             pred_translation_offset = np.zeros(3, dtype=np.float32)
+        elif pred_camera_mode == "input_corrected":
+            corrected_global_orient = correct_camera_global_orient_using_torso(
+                input_canonical_joints=canonical_input_joints_per_view[view_index],
+                pred_canonical_joints=canonical_pred_joints,
+                input_camera_global_orient=input_global_orient[view_index],
+            )
+            pred_vertices_oriented, pred_joints_oriented = build_smpl_outputs(
+                smpl_model=smpl_model,
+                device=device,
+                body_pose=pred_body_pose,
+                betas=pred_betas,
+                global_orient=corrected_global_orient,
+                transl=np.zeros(3, dtype=np.float32),
+            )
+            pred_translation_offset = input_joints_camera[0] - pred_joints_oriented[0]
+            pred_vertices_camera = np.ascontiguousarray(
+                pred_vertices_oriented + pred_translation_offset.reshape(1, 3)
+            )
+            pred_overlay_intrinsics = pred_cam_int
         else:
             pred_vertices_oriented, pred_joints_oriented = build_smpl_outputs(
                 smpl_model=smpl_model,

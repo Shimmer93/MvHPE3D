@@ -36,6 +36,7 @@ from mvhpe3d.utils import (
     validate_mhr_asset_folder,
 )
 from mvhpe3d.visualization import (
+    correct_camera_global_orient_using_torso,
     load_camera_parameters,
     resolve_rgb_image_path,
 )
@@ -166,8 +167,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--pred-camera-mode",
         type=str,
-        choices=("input", "gt"),
-        default="input",
+        choices=("input", "input_corrected", "gt"),
+        default="gt",
         help="Camera/root placement used for prediction overlays",
     )
     parser.add_argument(
@@ -524,7 +525,7 @@ def save_sample_outputs(
         "smoothing_window": smoothing_window,
         "placement_note": (
             "Predicted fused meshes are canonical bodies placed per view using "
-            f"{'the input-view fitted SMPL root pose and input intrinsics' if pred_camera_mode == 'input' else 'the HuMMan GT camera-frame root pose and GT intrinsics'}. "
+            f"{describe_pred_camera_mode(pred_camera_mode)}. "
             "GT meshes are built from HuMMan world-frame SMPL and projected with HuMMan GT cameras."
         ),
         "pred_camera_mode": pred_camera_mode,
@@ -582,6 +583,7 @@ def save_sample_outputs(
         (95, 190, 245),
     )
     fixed_view_meshes: list[tuple[str, np.ndarray, np.ndarray, tuple[int, int, int]]] = []
+    canonical_input_joints_per_view: list[np.ndarray] = []
     for view_index, camera_id in enumerate(meta["camera_ids"]):
         canonical_input_vertices, canonical_input_joints = build_smpl_outputs(
             smpl_model=smpl_model,
@@ -599,6 +601,7 @@ def save_sample_outputs(
                 input_fixed_view_colors[view_index % len(input_fixed_view_colors)],
             )
         )
+        canonical_input_joints_per_view.append(canonical_input_joints)
     canonical_pred_vertices, canonical_pred_joints = build_smpl_outputs(
         smpl_model=smpl_model,
         device=device,
@@ -685,6 +688,25 @@ def save_sample_outputs(
             )
             pred_overlay_intrinsics = gt_cam_int
             pred_translation_offset = np.zeros(3, dtype=np.float32)
+        elif pred_camera_mode == "input_corrected":
+            corrected_global_orient = correct_camera_global_orient_using_torso(
+                input_canonical_joints=canonical_input_joints_per_view[view_index],
+                pred_canonical_joints=canonical_pred_joints,
+                input_camera_global_orient=pred_view_global_orient[view_index],
+            )
+            pred_vertices_oriented, pred_joints_oriented = build_smpl_outputs(
+                smpl_model=smpl_model,
+                device=device,
+                body_pose=pred_body_pose,
+                betas=pred_betas,
+                global_orient=corrected_global_orient,
+                transl=np.zeros(3, dtype=np.float32),
+            )
+            pred_translation_offset = input_joints_camera[0] - pred_joints_oriented[0]
+            pred_vertices_camera = np.ascontiguousarray(
+                pred_vertices_oriented + pred_translation_offset.reshape(1, 3)
+            )
+            pred_overlay_intrinsics = pred_cam_int
         else:
             pred_vertices_oriented, pred_joints_oriented = build_smpl_outputs(
                 smpl_model=smpl_model,
@@ -901,6 +923,14 @@ def transform_world_vertices_to_camera(
     rotation = np.asarray(rotation, dtype=np.float32)
     translation = np.asarray(translation, dtype=np.float32).reshape(1, 3)
     return np.ascontiguousarray((rotation @ vertices_world.T).T + translation)
+
+
+def describe_pred_camera_mode(pred_camera_mode: str) -> str:
+    if pred_camera_mode == "gt":
+        return "the HuMMan GT camera-frame root pose and GT intrinsics"
+    if pred_camera_mode == "input_corrected":
+        return "the input-view fitted root pose corrected by a torso-based canonical rotation estimate and the input intrinsics"
+    return "the input-view fitted SMPL root pose and input intrinsics"
 
 
 class CameraMeshOverlayRenderer:

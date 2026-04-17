@@ -17,6 +17,7 @@ from .mhr_smpl_conversion import (
 from .rotation import (
     axis_angle_to_matrix,
     axis_angle_to_rotation_6d,
+    matrix_to_axis_angle,
     rotation_6d_to_axis_angle,
     rotation_6d_to_matrix,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "load_experiment_config",
     "resolve_camera_json_path",
     "resolve_mhr_asset_folder",
+    "matrix_to_axis_angle",
     "rotation_6d_to_axis_angle",
     "rotation_6d_to_matrix",
     "resolve_smpl_model_path",

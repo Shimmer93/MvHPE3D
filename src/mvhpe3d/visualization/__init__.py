@@ -1,5 +1,6 @@
 """Visualization helpers for MvHPE3D."""
 
+from .camera_correction import correct_camera_global_orient_using_torso
 from .smpl_overlay import (
     CameraParameters,
     camera_id_to_camera_key,
@@ -15,6 +16,7 @@ from .smpl_overlay import (
 __all__ = [
     "CameraParameters",
     "camera_id_to_camera_key",
+    "correct_camera_global_orient_using_torso",
     "load_camera_parameters",
     "overlay_mask_on_image",
     "project_vertices_camera_to_image",

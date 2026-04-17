@@ -39,6 +39,7 @@ from visualize_video import (
 )
 from mvhpe3d.metrics import batch_mpjpe
 from mvhpe3d.utils import build_smpl_model, validate_mhr_asset_folder
+from mvhpe3d.visualization import correct_camera_global_orient_using_torso
 
 
 def parse_args() -> argparse.Namespace:
@@ -86,6 +87,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-sequences", type=int, default=None, help="Optional cap on output videos")
     parser.add_argument("--max-frames", type=int, default=None, help="Optional cap on frames per sequence")
     parser.add_argument("--frame-step", type=int, default=1, help="Use every Nth frame in each sequence")
+    parser.add_argument(
+        "--pred-camera-mode",
+        type=str,
+        choices=("input", "input_corrected", "gt"),
+        default="gt",
+        help="Camera/root placement used for predicted RGB overlays",
+    )
     parser.add_argument(
         "--selection-mode",
         type=str,
@@ -255,6 +263,7 @@ def main() -> None:
                     input_smpl_cache_dir=input_smpl_cache_dir,
                     fixed_view_scene=fixed_view_scene,
                     ordered_view_indices=ordered_view_indices,
+                    pred_camera_mode=args.pred_camera_mode,
                 )
                 if writer is None:
                     frame_height, frame_width = frame_image.shape[:2]
@@ -390,6 +399,7 @@ def build_video_frame(
     input_smpl_cache_dir: Path,
     fixed_view_scene: dict[str, np.ndarray | float],
     ordered_view_indices: list[int],
+    pred_camera_mode: str,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     meta = batch["meta"][0]
     sequence_id = str(meta["sequence_id"])
@@ -478,6 +488,22 @@ def build_video_frame(
         global_orient=input_view_smpl["global_orient"][worse_view_index].detach().cpu().numpy(),
         transl=input_view_smpl["transl"][worse_view_index].detach().cpu().numpy(),
     )
+    worse_input_canonical_joints = build_smpl_outputs(
+        smpl_model=smpl_model,
+        device=device,
+        body_pose=input_view_smpl["body_pose"][worse_view_index].detach().cpu().numpy(),
+        betas=input_view_smpl["betas"][worse_view_index].detach().cpu().numpy(),
+        global_orient=np.zeros(3, dtype=np.float32),
+        transl=np.zeros(3, dtype=np.float32),
+    )[1]
+    canonical_pred_joints = build_smpl_outputs(
+        smpl_model=smpl_model,
+        device=device,
+        body_pose=pred_body_pose,
+        betas=pred_betas,
+        global_orient=np.zeros(3, dtype=np.float32),
+        transl=np.zeros(3, dtype=np.float32),
+    )[1]
     gt_view_a, gt_view_b = build_mesh_views(
         overlay_renderer=overlay_renderer,
         vertices=gt_world_vertices,
@@ -530,14 +556,52 @@ def build_video_frame(
         faces=faces,
         color_bgr=(0, 150, 225),
     )
-    pred_overlay = build_world_mesh_overlay(
-        overlay_renderer=overlay_renderer,
-        image_bgr=worse_rgb,
-        vertices_world=pred_world_vertices,
-        faces=faces,
-        camera=worse_camera,
-        color_bgr=(55, 85, 235),
-    )
+    if pred_camera_mode == "gt":
+        pred_overlay = build_world_mesh_overlay(
+            overlay_renderer=overlay_renderer,
+            image_bgr=worse_rgb,
+            vertices_world=pred_world_vertices,
+            faces=faces,
+            camera=worse_camera,
+            color_bgr=(55, 85, 235),
+        )
+    else:
+        pred_cam_int = batch["view_aux"]["cam_int"][0, worse_view_index].detach().cpu().numpy()
+        pred_global_orient = input_view_smpl["global_orient"][worse_view_index].detach().cpu().numpy()
+        if pred_camera_mode == "input_corrected":
+            pred_global_orient = correct_camera_global_orient_using_torso(
+                input_canonical_joints=worse_input_canonical_joints,
+                pred_canonical_joints=canonical_pred_joints,
+                input_camera_global_orient=pred_global_orient,
+            )
+        pred_vertices_camera, pred_joints_camera = build_smpl_outputs(
+            smpl_model=smpl_model,
+            device=device,
+            body_pose=pred_body_pose,
+            betas=pred_betas,
+            global_orient=pred_global_orient,
+            transl=np.zeros(3, dtype=np.float32),
+        )
+        _, input_joints_camera = build_smpl_outputs(
+            smpl_model=smpl_model,
+            device=device,
+            body_pose=input_view_smpl["body_pose"][worse_view_index].detach().cpu().numpy(),
+            betas=input_view_smpl["betas"][worse_view_index].detach().cpu().numpy(),
+            global_orient=input_view_smpl["global_orient"][worse_view_index].detach().cpu().numpy(),
+            transl=input_view_smpl["transl"][worse_view_index].detach().cpu().numpy(),
+        )
+        pred_translation_offset = input_joints_camera[0] - pred_joints_camera[0]
+        pred_vertices_camera = np.ascontiguousarray(
+            pred_vertices_camera + pred_translation_offset.reshape(1, 3)
+        )
+        pred_overlay = build_camera_mesh_overlay(
+            overlay_renderer=overlay_renderer,
+            image_bgr=worse_rgb,
+            vertices_camera=pred_vertices_camera,
+            intrinsics=pred_cam_int,
+            faces=faces,
+            color_bgr=(55, 85, 235),
+        )
 
     info_image = build_info_panel(width=panel_width, height=panel_height)
 
@@ -567,6 +631,7 @@ def build_video_frame(
         "sequence_id": sequence_id,
         "frame_id": frame_id,
         "ordered_view_indices": ordered_view_indices,
+        "pred_camera_mode": pred_camera_mode,
     }
 
 

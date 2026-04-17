@@ -72,6 +72,19 @@ class HuMManStage3Dataset(HuMManStage2Dataset):
             common_camera_ids,
             index=index,
         )
+        center_views = self._select_views_by_camera_ids(center_record, selected_camera_ids)
+        view_aux = {
+            "input_global_orient": [],
+            "input_transl": [],
+        }
+        for view in center_views:
+            fitted_payload = self._load_cached_input_smpl(view.npz_path)
+            view_aux["input_global_orient"].append(
+                self._require_field(fitted_payload, "global_orient", expected_last_dim=3)
+            )
+            view_aux["input_transl"].append(
+                self._require_field(fitted_payload, "transl", expected_last_dim=3)
+            )
 
         temporal_inputs: list[np.ndarray] = []
         window_frame_ids: list[str] = []
@@ -97,6 +110,10 @@ class HuMManStage3Dataset(HuMManStage2Dataset):
             "target_body_pose": torch.from_numpy(canonical_target["target_body_pose"]),
             "target_body_pose_6d": torch.from_numpy(canonical_target["target_body_pose_6d"]),
             "target_betas": torch.from_numpy(canonical_target["target_betas"]),
+            "view_aux": {
+                key: torch.from_numpy(np.stack(values, axis=0))
+                for key, values in view_aux.items()
+            },
             "meta": {
                 "sample_id": center_record.sample_id,
                 "sequence_id": center_record.sequence_id,

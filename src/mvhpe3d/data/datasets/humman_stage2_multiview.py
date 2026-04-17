@@ -59,6 +59,8 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
             "pred_cam_t": [],
             "cam_int": [],
             "image_size": [],
+            "input_global_orient": [],
+            "input_transl": [],
         }
         camera_ids: list[str] = []
 
@@ -72,6 +74,12 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
             view_aux["cam_int"].append(self._require_matrix(payload, "cam_int", shape=(3, 3)))
             view_aux["image_size"].append(
                 self._require_field(payload, "image_size", expected_last_dim=2)
+            )
+            view_aux["input_global_orient"].append(
+                self._require_field(fitted_payload, "global_orient", expected_last_dim=3)
+            )
+            view_aux["input_transl"].append(
+                self._require_field(fitted_payload, "transl", expected_last_dim=3)
             )
             camera_ids.append(view.camera_id)
 

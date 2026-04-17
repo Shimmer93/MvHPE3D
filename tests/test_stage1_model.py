@@ -203,6 +203,35 @@ def test_stage2_lightning_module_disabling_betas_zeros_beta_losses(
     assert metrics["train/loss_init_betas"].item() == 0.0
 
 
+def test_stage2_lightning_module_test_step_uses_camera_metrics(
+    sample_manifest: Path,
+    sample_input_smpl_cache: Path,
+) -> None:
+    datamodule = Stage2HuMManDataModule(
+        Stage2DataConfig(
+            manifest_path=str(sample_manifest),
+            input_smpl_cache_dir=str(sample_input_smpl_cache),
+            num_views=2,
+            batch_size=1,
+            drop_last_train=False,
+        )
+    )
+    datamodule.setup("test")
+    batch = next(iter(datamodule.test_dataloader()))
+
+    module = Stage2FusionLightningModule(model_config=Stage2ParamRefineConfig())
+    monkeypatch_torch = __import__("torch")
+    module._runtime_cache["smpl_eval_model"] = lambda **_: None
+    module._build_smpl_joints = lambda **kwargs: monkeypatch_torch.zeros(
+        kwargs["body_pose"].shape[0], 24, 3
+    )
+
+    metrics = module._shared_step(batch, stage="test")
+
+    assert "test/mpjpe" in metrics
+    assert "test/pa_mpjpe" in metrics
+
+
 
 
 def test_stage3_lightning_module_training_step(
@@ -233,6 +262,39 @@ def test_stage3_lightning_module_training_step(
     loss = module.training_step(batch, 0)
 
     assert loss.ndim == 0
+
+
+def test_stage3_lightning_module_test_step_uses_camera_metrics(
+    sample_manifest: Path,
+    sample_input_smpl_cache: Path,
+) -> None:
+    datamodule = Stage3HuMManDataModule(
+        Stage3DataConfig(
+            manifest_path=str(sample_manifest),
+            input_smpl_cache_dir=str(sample_input_smpl_cache),
+            num_views=2,
+            window_size=3,
+            batch_size=1,
+            drop_last_train=False,
+        )
+    )
+    datamodule.setup("test")
+    batch = next(iter(datamodule.test_dataloader()))
+
+    module = Stage3TemporalLightningModule(
+        model_config=Stage3TemporalRefineConfig(),
+        stage2_backbone_model=Stage2JointResidualModel(Stage2JointResidualConfig()),
+    )
+    monkeypatch_torch = __import__("torch")
+    module._runtime_cache["smpl_eval_model"] = lambda **_: None
+    module._build_smpl_joints = lambda **kwargs: monkeypatch_torch.zeros(
+        kwargs["body_pose"].shape[0], 24, 3
+    )
+
+    metrics = module._shared_step(batch, stage="test")
+
+    assert "test/mpjpe" in metrics
+    assert "test/pa_mpjpe" in metrics
 
 
 def test_load_stage2_experiment_config_resolves_sections() -> None:

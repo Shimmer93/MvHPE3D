@@ -14,6 +14,7 @@ from mvhpe3d.metrics import (
     batch_mpjpe,
     batch_pa_mpjpe,
     batch_similarity_align,
+    compute_input_corrected_camera_joint_metrics,
     root_center_joints,
 )
 from mvhpe3d.models import (
@@ -177,7 +178,7 @@ class Stage2FusionLightningModule(L.LightningModule):
             f"{stage}/loss_articulation": articulation_loss,
         }
 
-        if stage in {"val", "test"}:
+        if stage == "val":
             joint_metrics = self._compute_canonical_joint_metrics(
                 pred_body_pose=predictions["pred_body_pose"],
                 pred_betas=predictions["pred_betas"],
@@ -188,6 +189,21 @@ class Stage2FusionLightningModule(L.LightningModule):
                 {
                     f"{stage}/mpjpe": joint_metrics["mpjpe"],
                     f"{stage}/pa_mpjpe": joint_metrics["pa_mpjpe"],
+                }
+            )
+        if stage == "test":
+            joint_metrics = self._compute_test_joint_metrics(
+                pred_body_pose=predictions["pred_body_pose"],
+                pred_betas=predictions["pred_betas"],
+                target_body_pose=batch["target_body_pose"],
+                target_betas=batch["target_betas"],
+                views_input=batch["views_input"],
+                view_aux=batch["view_aux"],
+            )
+            metrics.update(
+                {
+                    "test/mpjpe": joint_metrics["mpjpe"],
+                    "test/pa_mpjpe": joint_metrics["pa_mpjpe"],
                 }
             )
         return metrics
@@ -273,6 +289,36 @@ class Stage2FusionLightningModule(L.LightningModule):
             )
             articulation_loss = F.mse_loss(aligned_pred, target_joints.float())
         return articulation_loss.to(pred_joints.dtype)
+
+    def _compute_test_joint_metrics(
+        self,
+        *,
+        pred_body_pose: torch.Tensor,
+        pred_betas: torch.Tensor,
+        target_body_pose: torch.Tensor,
+        target_betas: torch.Tensor,
+        views_input: torch.Tensor,
+        view_aux: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        pose_6d_dim = self.model_config.pose_6d_dim
+        input_pose_6d = views_input[..., :pose_6d_dim].reshape(
+            views_input.shape[0],
+            views_input.shape[1],
+            self.model_config.num_joints,
+            6,
+        )
+        input_betas = views_input[..., pose_6d_dim:]
+        return compute_input_corrected_camera_joint_metrics(
+            build_smpl_joints=self._build_smpl_joints,
+            pred_body_pose=pred_body_pose,
+            pred_betas=pred_betas,
+            target_body_pose=target_body_pose,
+            target_betas=target_betas,
+            input_views_pose_6d=input_pose_6d,
+            input_views_betas=input_betas,
+            input_camera_global_orient=view_aux["input_global_orient"].to(pred_body_pose.device),
+            input_transl=view_aux["input_transl"].to(pred_body_pose.device),
+        )
 
     def _build_smpl_joints(
         self,
