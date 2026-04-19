@@ -289,7 +289,11 @@ def build_loss_config(
     loss_kwargs = dict(config)
     if isinstance(
         model_config,
-        (Stage2ParamRefineConfig, Stage2JointResidualConfig, Stage2JointGraphRefinerConfig),
+        (
+            Stage2ParamRefineConfig,
+            Stage2JointResidualConfig,
+            Stage2JointGraphRefinerConfig,
+        ),
     ):
         if args.disable_learn_betas:
             loss_kwargs["supervise_betas"] = False
@@ -323,7 +327,11 @@ def build_optimization_config(
         return Stage3OptimizationConfig(**config)
     if isinstance(
         model_config,
-        (Stage2ParamRefineConfig, Stage2JointResidualConfig, Stage2JointGraphRefinerConfig),
+        (
+            Stage2ParamRefineConfig,
+            Stage2JointResidualConfig,
+            Stage2JointGraphRefinerConfig,
+        ),
     ):
         return Stage2OptimizationConfig(**config)
     return Stage1OptimizationConfig(**config)
@@ -516,7 +524,11 @@ def build_lightning_module(
         )
     if isinstance(
         model_config,
-        (Stage2ParamRefineConfig, Stage2JointResidualConfig, Stage2JointGraphRefinerConfig),
+        (
+            Stage2ParamRefineConfig,
+            Stage2JointResidualConfig,
+            Stage2JointGraphRefinerConfig,
+        ),
     ):
         return Stage2FusionLightningModule(
             model_config=model_config,

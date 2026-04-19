@@ -302,7 +302,11 @@ def load_eval_module(
         )
     if isinstance(
         model_config,
-        (Stage2ParamRefineConfig, Stage2JointResidualConfig, Stage2JointGraphRefinerConfig),
+        (
+            Stage2ParamRefineConfig,
+            Stage2JointResidualConfig,
+            Stage2JointGraphRefinerConfig,
+        ),
     ):
         return Stage2FusionLightningModule.load_from_checkpoint(
             checkpoint_path,

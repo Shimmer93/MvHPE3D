@@ -45,7 +45,11 @@ class Stage2FusionLightningModule(L.LightningModule):
         self,
         *,
         model_config: (
-            Stage2JointGraphRefinerConfig | Stage2JointResidualConfig | Stage2ParamRefineConfig | dict | None
+            Stage2JointGraphRefinerConfig
+            | Stage2JointResidualConfig
+            | Stage2ParamRefineConfig
+            | dict
+            | None
         ) = None,
         loss_config: Stage2LossConfig | dict | None = None,
         optimization_config: Stage2OptimizationConfig | dict | None = None,
@@ -415,7 +419,11 @@ def _coerce_stage2_model_config(value):
         return Stage2ParamRefineConfig()
     if isinstance(
         value,
-        (Stage2ParamRefineConfig, Stage2JointResidualConfig, Stage2JointGraphRefinerConfig),
+        (
+            Stage2ParamRefineConfig,
+            Stage2JointResidualConfig,
+            Stage2JointGraphRefinerConfig,
+        ),
     ):
         return value
     if isinstance(value, dict):
