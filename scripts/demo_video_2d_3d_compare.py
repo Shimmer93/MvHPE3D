@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import argparse
 import random
+import shutil
 import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
+import trimesh
 from detectron2 import model_zoo
 from detectron2.config import get_cfg
 from detectron2.engine import DefaultPredictor
@@ -119,6 +121,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="outputs/demo_videos",
         help="Directory to save MP4 videos",
+    )
+    parser.add_argument(
+        "--asset-dir",
+        type=str,
+        default="outputs/demo",
+        help="Directory to save exported demo meshes and copied reference RGB images",
     )
     parser.add_argument("--output-path", type=str, default=None, help="Optional single-sequence MP4 path")
     parser.add_argument("--device", type=str, default=None, help="Torch device for inference")
@@ -268,6 +276,8 @@ def main() -> None:
 
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    asset_dir = Path(args.asset_dir).resolve()
+    asset_dir.mkdir(parents=True, exist_ok=True)
     data_root = Path(data_config.manifest_path).resolve().parent
     rgb_dir = resolve_required_dir(args.rgb_dir, fallback=data_root / "rgb", name="rgb")
     cameras_dir = resolve_required_dir(args.cameras_dir, fallback=data_root / "cameras", name="cameras")
@@ -301,7 +311,16 @@ def main() -> None:
                 sequence_id=sequence_id,
             )
             batch = multiview_collate([dataset[reference_dataset_index]])
-            static_rgb, static_pose2d, pred_vertices, pred_joints, footer, selected_camera = build_static_assets(
+            (
+                static_rgb,
+                static_pose2d,
+                pred_vertices,
+                pred_joints,
+                footer,
+                selected_camera,
+                reference_image_path,
+                reference_stem,
+            ) = build_static_assets(
                 batch=batch,
                 module=module,
                 smpl_model=smpl_model,
@@ -315,6 +334,13 @@ def main() -> None:
                 predictor=predictor,
                 keypoint_threshold=args.keypoint_threshold,
                 view_a_camera_id=args.view_a,
+            )
+            save_demo_assets(
+                asset_dir=asset_dir,
+                stem=reference_stem,
+                pred_vertices=pred_vertices,
+                faces=faces,
+                reference_image_path=reference_image_path,
             )
 
             panel_height, panel_width = static_rgb.shape[:2]
@@ -473,7 +499,7 @@ def build_static_assets(
     predictor: DefaultPredictor,
     keypoint_threshold: float,
     view_a_camera_id: str | None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, str, object]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, str, object, Path, str]:
     meta = batch["meta"][0]
     camera_ids = [str(camera_id) for camera_id in meta["camera_ids"]]
     view_index = resolve_view_index(camera_ids=camera_ids, view_a_camera_id=view_a_camera_id)
@@ -486,6 +512,12 @@ def build_static_assets(
         camera_id=camera_ids[view_index],
         frame_id=frame_id,
     )
+    reference_image_path = resolve_rgb_image_path(
+        rgb_dir,
+        sequence_id=sequence_id,
+        camera_id=camera_ids[view_index],
+        frame_id=frame_id,
+    ).resolve()
     selected_camera = load_camera_parameters(
         cameras_dir,
         sequence_id=sequence_id,
@@ -521,7 +553,17 @@ def build_static_assets(
         transl=gt_transl,
     )
     footer = f"{sequence_id} | frame {frame_id} | view {camera_ids[view_index]}"
-    return image_bgr, pose2d_panel, pred_vertices, pred_joints, footer, selected_camera
+    reference_stem = f"{sequence_id}_frame{frame_id}_{camera_ids[view_index]}"
+    return (
+        image_bgr,
+        pose2d_panel,
+        pred_vertices,
+        pred_joints,
+        footer,
+        selected_camera,
+        reference_image_path,
+        reference_stem,
+    )
 
 
 def resolve_view_index(*, camera_ids: list[str], view_a_camera_id: str | None) -> int:
@@ -546,6 +588,26 @@ def load_view_rgb(*, rgb_dir: Path, sequence_id: str, camera_id: str, frame_id: 
     if image_bgr is None:
         raise FileNotFoundError(f"Failed to read RGB image: {image_path}")
     return image_bgr
+
+
+def save_demo_assets(
+    *,
+    asset_dir: Path,
+    stem: str,
+    pred_vertices: np.ndarray,
+    faces: np.ndarray,
+    reference_image_path: Path,
+) -> None:
+    mesh_path = asset_dir / f"{stem}_pred_mesh.ply"
+    image_path = asset_dir / f"{stem}_image{reference_image_path.suffix.lower()}"
+
+    mesh = trimesh.Trimesh(
+        vertices=np.asarray(pred_vertices, dtype=np.float32).copy(),
+        faces=np.asarray(faces, dtype=np.int32),
+        process=False,
+    )
+    mesh.export(mesh_path)
+    shutil.copy2(reference_image_path, image_path)
 
 
 def render_pose2d_panel(
