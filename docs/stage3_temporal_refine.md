@@ -14,7 +14,7 @@ The design is intentionally conservative:
 
 - keep the Stage 2 multiview fusion backbone
 - run it independently on each frame in a short window
-- use a small temporal model to refine only the center frame
+- use a small temporal model to refine one target frame
 
 So Stage 3 should be understood as:
 
@@ -56,7 +56,7 @@ where:
 - $T$ is temporal window length
 - $V$ is number of views
 
-The output is only for the center frame:
+For the default centered variant, the output is only for the center frame:
 
 - refined body pose: `23 x 6`
 - refined betas: `10`
@@ -181,6 +181,16 @@ $$
 
 This keeps Stage 3 in a refinement regime instead of letting it drift far away from the Stage 2 solution.
 
+The residual heads are zero-initialized. At epoch 0, the residuals are exactly zero, so Stage 3 exactly matches the frozen center-frame Stage 2 prediction before learning any temporal correction.
+
+The default Stage 3 experiment also keeps this residual branch conservative during training: it uses a smaller pose residual scale, a lower learning rate than the early prototype, gradient clipping, and a small residual-norm penalty. Those guardrails are intended to prevent late-training drift away from the strong Stage 2 baseline.
+
+For the current joint-graph Stage 2 baseline, the good checkpoint is:
+
+```text
+outputs/stage2/stage2_cross_camera_joint_graph_refiner/version_1/checkpoints/epoch=080-step=015390.ckpt
+```
+
 ## Why The Model Predicts Only The Center Frame
 
 This is a common choice in temporal refinement models.
@@ -195,6 +205,24 @@ That avoids edge artifacts inside the training target and keeps the problem simp
 So Stage 3 is not trying to be a sequence-to-sequence generator.
 
 It is a sequence-to-center-frame refiner.
+
+## Causal Variant
+
+The causal variant keeps the same frozen Stage 2 backbone and residual-only Stage 3 head, but changes the temporal window and target index.
+
+For a causal window of length $T$, the dataset returns:
+
+$$
+\{x_{t-T+1}, \dots, x_{t-1}, x_t\}.
+$$
+
+The target is the last frame $x_t$, not the center frame. This means the Stage 3 correction uses only past frames and the current frame, so it is suitable for online or streaming evaluation where future frames are unavailable.
+
+The causal entrypoint is:
+
+```bash
+uv run python scripts/train.py --config configs/experiment/stage3_temporal_refine_causal.yaml --stage2-checkpoint-path outputs/stage2/stage2_cross_camera_joint_graph_refiner/version_1/checkpoints/epoch=080-step=015390.ckpt
+```
 
 ## Why This Design Is Conservative
 
@@ -251,7 +279,7 @@ The main parts correspond to:
 
 - [humman_stage3_sequence.py](/home/zpengac/mmhpe/MvHPE3D/src/mvhpe3d/data/datasets/humman_stage3_sequence.py:1): builds temporal windows with shared camera identities
 - [stage3_module.py](/home/zpengac/mmhpe/MvHPE3D/src/mvhpe3d/lightning/stage3_module.py:1): runs the Stage 2 backbone per frame, builds temporal features, and applies the Stage 3 losses
-- [temporal_refine.py](/home/zpengac/mmhpe/MvHPE3D/src/mvhpe3d/models/stage3/temporal_refine.py:1): temporal conv stack and center-frame residual heads
+- [temporal_refine.py](/home/zpengac/mmhpe/MvHPE3D/src/mvhpe3d/models/stage3/temporal_refine.py:1): temporal conv stack and target-frame residual heads
 
 The forward flow is:
 

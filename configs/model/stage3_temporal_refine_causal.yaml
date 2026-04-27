@@ -10,3 +10,4 @@ dropout: 0.1
 pose_residual_scale: 0.05
 betas_residual_scale: 0.05
 freeze_backbone: true
+causal: true

@@ -19,10 +19,10 @@ class HuMManStage3Dataset(HuMManStage2Dataset):
 
     Each returned sample follows the schema:
     - ``views_input``: tensor of shape ``[T, V, 148]``
-    - ``target_body_pose``: center-frame canonical target SMPL body pose
-    - ``target_body_pose_6d``: center-frame target pose in 6D rotation form
-    - ``target_betas``: center-frame target SMPL shape coefficients
-    - ``meta``: center-frame ids plus the full temporal window frame ids
+    - ``target_body_pose``: target-frame canonical target SMPL body pose
+    - ``target_body_pose_6d``: target-frame target pose in 6D rotation form
+    - ``target_betas``: target-frame target SMPL shape coefficients
+    - ``meta``: target-frame ids plus the full temporal window frame ids
     """
 
     def __init__(
@@ -35,6 +35,7 @@ class HuMManStage3Dataset(HuMManStage2Dataset):
         cameras_dir: str | Path,
         input_smpl_cache_dir: str | Path,
         window_size: int,
+        causal: bool = False,
         seed: int = 0,
     ) -> None:
         super().__init__(
@@ -46,10 +47,16 @@ class HuMManStage3Dataset(HuMManStage2Dataset):
             input_smpl_cache_dir=input_smpl_cache_dir,
             seed=seed,
         )
-        if window_size < 1 or window_size % 2 == 0:
-            raise ValueError(f"window_size must be a positive odd integer, got {window_size}")
+        if window_size < 1:
+            raise ValueError(f"window_size must be positive, got {window_size}")
+        if not causal and window_size % 2 == 0:
+            raise ValueError(
+                f"Centered Stage 3 window_size must be odd, got {window_size}"
+            )
+        self.causal = causal
         self.window_size = window_size
         self.window_radius = window_size // 2
+        self.target_window_index = window_size - 1 if causal else self.window_radius
         self.sequence_records = self._group_records_by_sequence(records)
         self.window_index: list[tuple[str, int, tuple[str, ...]]] = []
         for sequence_id, sequence_records in self.sequence_records.items():
@@ -89,7 +96,7 @@ class HuMManStage3Dataset(HuMManStage2Dataset):
         temporal_inputs: list[np.ndarray] = []
         window_frame_ids: list[str] = []
         window_view_npz_paths: list[list[str]] = []
-        for offset in range(-self.window_radius, self.window_radius + 1):
+        for offset in self._window_offsets():
             frame_index = min(max(center_index + offset, 0), len(sequence_records) - 1)
             frame_record = sequence_records[frame_index]
             frame_views = self._select_views_by_camera_ids(frame_record, selected_camera_ids)
@@ -119,6 +126,8 @@ class HuMManStage3Dataset(HuMManStage2Dataset):
                 "sequence_id": center_record.sequence_id,
                 "frame_id": center_record.frame_id,
                 "window_frame_ids": window_frame_ids,
+                "target_window_index": self.target_window_index,
+                "causal": self.causal,
                 "camera_ids": selected_camera_ids,
                 "window_view_npz_paths": window_view_npz_paths,
             },
@@ -153,7 +162,7 @@ class HuMManStage3Dataset(HuMManStage2Dataset):
         center_index: int,
     ) -> tuple[str, ...]:
         common_camera_ids: set[str] | None = None
-        for offset in range(-self.window_radius, self.window_radius + 1):
+        for offset in self._window_offsets():
             frame_index = min(max(center_index + offset, 0), len(sequence_records) - 1)
             frame_record = sequence_records[frame_index]
             frame_camera_ids = {view.camera_id for view in frame_record.views}
@@ -165,6 +174,11 @@ class HuMManStage3Dataset(HuMManStage2Dataset):
                 return ()
         assert common_camera_ids is not None
         return tuple(sorted(common_camera_ids))
+
+    def _window_offsets(self) -> range:
+        if self.causal:
+            return range(1 - self.window_size, 1)
+        return range(-self.window_radius, self.window_radius + 1)
 
     def _select_temporal_camera_ids(
         self,

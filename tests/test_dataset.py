@@ -238,6 +238,31 @@ def test_stage3_dataset_uses_only_cameras_shared_across_window(tmp_path: Path) -
     assert sample["meta"]["camera_ids"] == ["kinect_000", "kinect_001"]
 
 
+def test_stage3_causal_dataset_uses_past_window(
+    sample_manifest: Path,
+    sample_input_smpl_cache: Path,
+) -> None:
+    records = load_sample_records(sample_manifest)
+    dataset = HuMManStage3Dataset(
+        records,
+        num_views=2,
+        train=False,
+        gt_smpl_dir=sample_manifest.parent / "smpl",
+        cameras_dir=sample_manifest.parent / "cameras",
+        input_smpl_cache_dir=sample_input_smpl_cache,
+        window_size=3,
+        causal=True,
+    )
+
+    sample = dataset[2]
+
+    assert tuple(sample["views_input"].shape) == (3, 2, 148)
+    assert sample["meta"]["frame_id"] == "000003"
+    assert sample["meta"]["window_frame_ids"] == ["000001", "000002", "000003"]
+    assert sample["meta"]["target_window_index"] == 2
+    assert sample["meta"]["causal"] is True
+
+
 def test_resolve_split_records_filters_views_by_named_policy(
     sample_inventory_manifest: Path,
     sample_split_config: Path,

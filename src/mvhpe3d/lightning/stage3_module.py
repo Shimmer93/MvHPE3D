@@ -101,13 +101,19 @@ class Stage3TemporalLightningModule(L.LightningModule):
         pred_pose_6d = stage2_outputs["pred_pose_6d"].reshape(batch_size, num_frames, -1)
         pred_betas = stage2_outputs["pred_betas"].reshape(batch_size, num_frames, -1)
         temporal_features = torch.cat((init_pose_6d, pred_pose_6d, pred_betas), dim=-1)
-        center_index = num_frames // 2
+        target_index = self._target_frame_index(num_frames)
         outputs = self.model(
             temporal_features,
-            base_pose_6d=pred_pose_6d[:, center_index],
-            base_betas=pred_betas[:, center_index],
+            base_pose_6d=pred_pose_6d[:, target_index],
+            base_betas=pred_betas[:, target_index],
         )
-        outputs["stage2_init_pose_6d"] = init_pose_6d[:, center_index].reshape(
+        outputs["stage2_pred_pose_6d"] = pred_pose_6d[:, target_index].reshape(
+            batch_size,
+            self.model_config.num_joints,
+            6,
+        )
+        outputs["stage2_pred_betas"] = pred_betas[:, target_index]
+        outputs["stage2_init_pose_6d"] = init_pose_6d[:, target_index].reshape(
             batch_size,
             self.model_config.num_joints,
             6,
@@ -180,6 +186,8 @@ class Stage3TemporalLightningModule(L.LightningModule):
             pred_betas=predictions["pred_betas"],
             target_pose_6d=batch["target_body_pose_6d"],
             target_betas=batch["target_betas"],
+            pose_residual_6d=predictions["pose_residual_6d"],
+            betas_residual=predictions["betas_residual"],
         )
         for name, value in losses.items():
             self._assert_finite_tensor(f"losses/{name}", value)
@@ -207,8 +215,17 @@ class Stage3TemporalLightningModule(L.LightningModule):
             f"{stage}/loss": total_loss,
             f"{stage}/loss_pose_6d": losses["loss_pose_6d"],
             f"{stage}/loss_betas": losses["loss_betas"],
+            f"{stage}/loss_pose_residual": losses["loss_pose_residual"],
+            f"{stage}/loss_betas_residual": losses["loss_betas_residual"],
             f"{stage}/loss_joints": joint_loss,
             f"{stage}/loss_articulation": articulation_loss,
+            f"{stage}/pose_residual_abs_mean": (
+                predictions["pose_residual_6d"].detach().abs().mean()
+            ),
+            f"{stage}/pose_residual_abs_max": (
+                predictions["pose_residual_6d"].detach().abs().amax()
+            ),
+            f"{stage}/pred_pose_6d_abs_max": predictions["pred_pose_6d"].detach().abs().amax(),
         }
 
         if stage == "val":
@@ -345,15 +362,15 @@ class Stage3TemporalLightningModule(L.LightningModule):
         views_input: torch.Tensor,
         view_aux: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
-        center_index = views_input.shape[1] // 2
-        center_views_input = views_input[:, center_index]
-        input_pose_6d = center_views_input[..., : self.model_config.pose_6d_dim].reshape(
-            center_views_input.shape[0],
-            center_views_input.shape[1],
+        target_index = self._target_frame_index(views_input.shape[1])
+        target_views_input = views_input[:, target_index]
+        input_pose_6d = target_views_input[..., : self.model_config.pose_6d_dim].reshape(
+            target_views_input.shape[0],
+            target_views_input.shape[1],
             self.model_config.num_joints,
             6,
         )
-        input_betas = center_views_input[..., self.model_config.pose_6d_dim :]
+        input_betas = target_views_input[..., self.model_config.pose_6d_dim :]
         return compute_input_corrected_camera_joint_metrics(
             build_smpl_joints=self._build_smpl_joints,
             pred_body_pose=pred_body_pose,
@@ -365,6 +382,9 @@ class Stage3TemporalLightningModule(L.LightningModule):
             input_camera_global_orient=view_aux["input_global_orient"].to(pred_body_pose.device),
             input_transl=view_aux["input_transl"].to(pred_body_pose.device),
         )
+
+    def _target_frame_index(self, num_frames: int) -> int:
+        return self.model.target_frame_index(num_frames)
 
     def _build_smpl_joints(
         self,

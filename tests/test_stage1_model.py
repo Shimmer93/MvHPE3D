@@ -4,6 +4,9 @@ import importlib.util
 from argparse import Namespace
 from pathlib import Path
 
+import torch
+import torch.nn as nn
+
 from mvhpe3d.data import (
     Stage1DataConfig,
     Stage1HuMManDataModule,
@@ -17,6 +20,7 @@ from mvhpe3d.lightning import (
     Stage2FusionLightningModule,
     Stage3TemporalLightningModule,
 )
+from mvhpe3d.losses import Stage3Loss, Stage3LossConfig
 from mvhpe3d.models import (
     Stage1MLPFusionConfig,
     Stage1MLPFusionModel,
@@ -113,6 +117,149 @@ def test_stage3_temporal_refine_model_forward_shapes() -> None:
     assert tuple(outputs["pred_pose_6d"].shape) == (2, 23, 6)
     assert tuple(outputs["pred_body_pose"].shape) == (2, 69)
     assert tuple(outputs["pred_betas"].shape) == (2, 10)
+
+
+def test_stage3_temporal_refine_model_zero_init_matches_stage2_baseline() -> None:
+    config = Stage3TemporalRefineConfig(
+        learn_betas=True,
+        hidden_dim=32,
+        temporal_dim=16,
+        temporal_layers=1,
+        head_layers=2,
+    )
+    model = Stage3TemporalRefineModel(config)
+    temporal_features = torch.randn(4, 5, config.temporal_feature_dim)
+    base_pose_6d = torch.randn(4, config.num_joints, 6)
+    base_betas = torch.randn(4, config.betas_dim)
+
+    outputs = model(
+        temporal_features,
+        base_pose_6d=base_pose_6d,
+        base_betas=base_betas,
+    )
+
+    assert torch.equal(
+        outputs["pose_residual_6d"],
+        torch.zeros_like(outputs["pose_residual_6d"]),
+    )
+    assert torch.equal(outputs["betas_residual"], torch.zeros_like(outputs["betas_residual"]))
+    assert torch.equal(outputs["base_pose_6d"], base_pose_6d)
+    assert torch.equal(outputs["base_betas"], base_betas)
+    assert torch.equal(outputs["pred_pose_6d"], base_pose_6d)
+    assert torch.equal(outputs["pred_betas"], base_betas)
+
+
+def test_stage3_loss_includes_residual_regularization_when_configured() -> None:
+    criterion = Stage3Loss(
+        Stage3LossConfig(
+            pose_6d_weight=0.0,
+            betas_weight=0.0,
+            pose_residual_weight=2.0,
+            betas_residual_weight=3.0,
+            supervise_betas=True,
+        )
+    )
+    pred_pose_6d = torch.zeros(1, 23, 6)
+    pred_betas = torch.zeros(1, 10)
+    pose_residual_6d = torch.full((1, 23, 6), 0.5)
+    betas_residual = torch.full((1, 10), 0.25)
+
+    losses = criterion(
+        pred_pose_6d=pred_pose_6d,
+        pred_betas=pred_betas,
+        target_pose_6d=pred_pose_6d,
+        target_betas=pred_betas,
+        pose_residual_6d=pose_residual_6d,
+        betas_residual=betas_residual,
+    )
+
+    assert torch.isclose(losses["loss_pose_residual"], torch.tensor(0.25))
+    assert torch.isclose(losses["loss_betas_residual"], torch.tensor(0.0625))
+    assert torch.isclose(losses["loss"], torch.tensor(0.6875))
+
+
+class _EchoStage2Backbone(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.pose_offset = nn.Parameter(torch.tensor(0.25))
+
+    def forward(self, views_input: torch.Tensor) -> dict[str, torch.Tensor]:
+        batch_size = views_input.shape[0]
+        pooled_input = views_input.mean(dim=1)
+        init_pose_6d = pooled_input[:, :138].reshape(batch_size, 23, 6)
+        pred_pose_6d = init_pose_6d + self.pose_offset
+        pred_betas = pooled_input[:, 138:]
+        return {
+            "init_pose_6d": init_pose_6d,
+            "pred_pose_6d": pred_pose_6d,
+            "pred_betas": pred_betas,
+        }
+
+
+def test_stage3_lightning_module_zero_init_matches_frozen_stage2_center_prediction() -> None:
+    config = Stage3TemporalRefineConfig(
+        hidden_dim=32,
+        temporal_dim=16,
+        temporal_layers=1,
+        head_layers=2,
+    )
+    module = Stage3TemporalLightningModule(
+        model_config=config,
+        stage2_backbone_model=_EchoStage2Backbone(),
+    )
+    views_input = torch.randn(2, 5, 3, config.pose_6d_dim + config.betas_dim)
+
+    outputs = module(views_input)
+
+    assert not any(
+        parameter.requires_grad for parameter in module.stage2_backbone.parameters()
+    )
+    with torch.no_grad():
+        flat_input = views_input.reshape(10, 3, config.pose_6d_dim + config.betas_dim)
+        stage2_outputs = module.stage2_backbone(flat_input)
+    expected_pose_6d = stage2_outputs["pred_pose_6d"].reshape(2, 5, 23, 6)[:, 2]
+    expected_betas = stage2_outputs["pred_betas"].reshape(2, 5, 10)[:, 2]
+
+    assert torch.equal(outputs["stage2_pred_pose_6d"], expected_pose_6d)
+    assert torch.equal(outputs["stage2_pred_betas"], expected_betas)
+    assert torch.equal(outputs["base_pose_6d"], expected_pose_6d)
+    assert torch.equal(outputs["base_betas"], expected_betas)
+    assert torch.equal(
+        outputs["pose_residual_6d"],
+        torch.zeros_like(outputs["pose_residual_6d"]),
+    )
+    assert torch.equal(outputs["betas_residual"], torch.zeros_like(outputs["betas_residual"]))
+    assert torch.equal(outputs["pred_pose_6d"], expected_pose_6d)
+    assert torch.equal(outputs["pred_betas"], expected_betas)
+
+
+def test_stage3_lightning_module_causal_zero_init_matches_last_stage2_prediction() -> None:
+    config = Stage3TemporalRefineConfig(
+        hidden_dim=32,
+        temporal_dim=16,
+        temporal_layers=1,
+        head_layers=2,
+        causal=True,
+    )
+    module = Stage3TemporalLightningModule(
+        model_config=config,
+        stage2_backbone_model=_EchoStage2Backbone(),
+    )
+    views_input = torch.randn(2, 5, 3, config.pose_6d_dim + config.betas_dim)
+
+    outputs = module(views_input)
+
+    with torch.no_grad():
+        flat_input = views_input.reshape(10, 3, config.pose_6d_dim + config.betas_dim)
+        stage2_outputs = module.stage2_backbone(flat_input)
+    expected_pose_6d = stage2_outputs["pred_pose_6d"].reshape(2, 5, 23, 6)[:, -1]
+    expected_betas = stage2_outputs["pred_betas"].reshape(2, 5, 10)[:, -1]
+
+    assert torch.equal(outputs["target_frame_index"], torch.full((2,), 4))
+    assert torch.equal(outputs["stage2_pred_pose_6d"], expected_pose_6d)
+    assert torch.equal(outputs["stage2_pred_betas"], expected_betas)
+    assert torch.equal(outputs["pred_pose_6d"], expected_pose_6d)
+    assert torch.equal(outputs["pred_betas"], expected_betas)
 
 
 def test_stage2_lightning_module_training_step(
@@ -329,6 +476,16 @@ def test_load_stage3_experiment_config_resolves_sections() -> None:
     assert experiment["experiment_name"] == "stage3_temporal_refine"
     assert experiment["data"]["name"] == "humman_stage3"
     assert experiment["model"]["name"] == "stage3_temporal_refine"
+
+
+def test_load_stage3_causal_experiment_config_resolves_sections() -> None:
+    experiment = load_experiment_config("configs/experiment/stage3_temporal_refine_causal.yaml")
+
+    assert experiment["experiment_name"] == "stage3_temporal_refine_causal"
+    assert experiment["data"]["name"] == "humman_stage3"
+    assert experiment["data"]["causal"] is True
+    assert experiment["model"]["name"] == "stage3_temporal_refine"
+    assert experiment["model"]["causal"] is True
 
 
 def test_stage1_lightning_module_validation_step_adds_joint_metrics(

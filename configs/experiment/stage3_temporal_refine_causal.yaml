@@ -1,10 +1,10 @@
-name: "stage3_temporal_refine"
+name: "stage3_temporal_refine_causal"
 
 data:
-  config: "configs/data/humman_stage3.yaml"
+  config: "configs/data/humman_stage3_causal.yaml"
 
 model:
-  config: "configs/model/stage3_temporal_refine.yaml"
+  config: "configs/model/stage3_temporal_refine_causal.yaml"
 
 loss:
   pose_6d_weight: 1.0

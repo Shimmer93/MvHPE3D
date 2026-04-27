@@ -208,6 +208,7 @@ class Stage3DataConfig:
     split_name: str | None = None
     num_views: int = 2
     window_size: int = 9
+    causal: bool = False
     batch_size: int = 16
     num_workers: int = 0
     train_split: str = "train"
@@ -403,9 +404,12 @@ class Stage3HuMManDataModule(L.LightningDataModule):
                 "Input SMPL cache directory does not exist: "
                 f"{input_smpl_cache_dir}. Run scripts/precompute_input_smpl.py first."
             )
-        if self.config.window_size < 1 or self.config.window_size % 2 == 0:
+        if self.config.window_size < 1:
+            raise ValueError(f"window_size must be positive, got {self.config.window_size}")
+        if not self.config.causal and self.config.window_size % 2 == 0:
             raise ValueError(
-                f"window_size must be a positive odd integer, got {self.config.window_size}"
+                "Centered Stage 3 window_size must be a positive odd integer, "
+                f"got {self.config.window_size}"
             )
         if self.config.split_config_path is not None:
             split_config_path = Path(self.config.split_config_path)
@@ -428,6 +432,7 @@ class Stage3HuMManDataModule(L.LightningDataModule):
                 cameras_dir=cameras_dir,
                 input_smpl_cache_dir=input_smpl_cache_dir,
                 window_size=self.config.window_size,
+                causal=self.config.causal,
                 seed=self.config.seed,
             )
             self._assert_dataset_not_empty(
@@ -443,6 +448,7 @@ class Stage3HuMManDataModule(L.LightningDataModule):
                 cameras_dir=cameras_dir,
                 input_smpl_cache_dir=input_smpl_cache_dir,
                 window_size=self.config.window_size,
+                causal=self.config.causal,
                 seed=self.config.seed,
             )
             self._assert_dataset_not_empty(
@@ -460,6 +466,7 @@ class Stage3HuMManDataModule(L.LightningDataModule):
                 cameras_dir=cameras_dir,
                 input_smpl_cache_dir=input_smpl_cache_dir,
                 window_size=self.config.window_size,
+                causal=self.config.causal,
                 seed=self.config.seed,
             )
             self._assert_dataset_not_empty(
@@ -477,6 +484,7 @@ class Stage3HuMManDataModule(L.LightningDataModule):
                 cameras_dir=cameras_dir,
                 input_smpl_cache_dir=input_smpl_cache_dir,
                 window_size=self.config.window_size,
+                causal=self.config.causal,
                 seed=self.config.seed,
             )
             self._assert_dataset_not_empty(

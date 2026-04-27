@@ -112,6 +112,8 @@ class Stage3LossConfig:
     betas_weight: float = 0.1
     joint_weight: float = 1.0
     articulation_weight: float = 0.0
+    pose_residual_weight: float = 0.0
+    betas_residual_weight: float = 0.0
     supervise_betas: bool = True
 
 
@@ -129,18 +131,32 @@ class Stage3Loss(nn.Module):
         pred_betas: torch.Tensor,
         target_pose_6d: torch.Tensor,
         target_betas: torch.Tensor,
+        pose_residual_6d: torch.Tensor | None = None,
+        betas_residual: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         pose_6d_loss = F.mse_loss(pred_pose_6d, target_pose_6d)
         if self.config.supervise_betas:
             betas_loss = F.mse_loss(pred_betas, target_betas)
         else:
             betas_loss = pose_6d_loss.new_zeros(())
+        if pose_residual_6d is not None and self.config.pose_residual_weight > 0:
+            pose_residual_loss = pose_residual_6d.square().mean()
+        else:
+            pose_residual_loss = pose_6d_loss.new_zeros(())
+        if betas_residual is not None and self.config.betas_residual_weight > 0:
+            betas_residual_loss = betas_residual.square().mean()
+        else:
+            betas_residual_loss = pose_6d_loss.new_zeros(())
         total_loss = (
             self.config.pose_6d_weight * pose_6d_loss
             + self.config.betas_weight * betas_loss
+            + self.config.pose_residual_weight * pose_residual_loss
+            + self.config.betas_residual_weight * betas_residual_loss
         )
         return {
             "loss": total_loss,
             "loss_pose_6d": pose_6d_loss,
             "loss_betas": betas_loss,
+            "loss_pose_residual": pose_residual_loss,
+            "loss_betas_residual": betas_residual_loss,
         }
