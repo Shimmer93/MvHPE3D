@@ -58,6 +58,82 @@ def load_camera_parameters(
     )
 
 
+def resolve_panoptic_camera_json_path(cameras_dir: str | Path, *, sequence_id: str) -> Path:
+    """Resolve a Panoptic/Kinoptic cropped camera JSON path.
+
+    Supports either the native dataset root layout:
+    ``<root>/<sequence>/meta/cameras_kinect_cropped.json``
+    or a pre-exported camera directory containing sequence-level JSON files.
+    """
+    cameras_path = Path(cameras_dir).resolve()
+    candidates = [
+        cameras_path / sequence_id / "meta" / "cameras_kinect_cropped.json",
+        cameras_path / sequence_id / "cameras_kinect_cropped.json",
+        cameras_path / "meta" / "cameras_kinect_cropped.json",
+        cameras_path / "cameras_kinect_cropped.json",
+        cameras_path / f"{sequence_id}_cameras_kinect_cropped.json",
+        cameras_path / f"{sequence_id}_cameras.json",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    raise FileNotFoundError(
+        "Panoptic camera JSON does not exist. Checked: "
+        + ", ".join(str(candidate) for candidate in candidates)
+    )
+
+
+def panoptic_camera_id_to_camera_key(camera_id: str) -> str:
+    """Map manifest camera IDs such as ``kinect_001`` to Panoptic keys."""
+    if not camera_id.startswith("kinect_"):
+        raise KeyError(f"Unsupported Panoptic camera_id '{camera_id}'")
+    suffix = camera_id.split("_", maxsplit=1)[1]
+    return f"kinect_{int(suffix)}"
+
+
+def load_panoptic_camera_parameters(
+    cameras_dir: str | Path,
+    *,
+    sequence_id: str,
+    camera_id: str,
+) -> CameraParameters:
+    """Load one cropped Panoptic/Kinoptic camera calibration entry."""
+    camera_json_path = resolve_panoptic_camera_json_path(
+        cameras_dir,
+        sequence_id=sequence_id,
+    )
+    payload = json.loads(camera_json_path.read_text(encoding="utf-8"))
+
+    camera_key = panoptic_camera_id_to_camera_key(camera_id)
+    if camera_key not in payload and camera_id in payload:
+        camera_key = camera_id
+    if camera_key not in payload:
+        raise KeyError(f"Camera key '{camera_key}' was not found in {camera_json_path}")
+
+    camera_payload = payload[camera_key]
+    if "K_color" in camera_payload:
+        intrinsics = np.asarray(camera_payload["K_color"], dtype=np.float32)
+    else:
+        intrinsics = np.asarray(camera_payload["K"], dtype=np.float32)
+
+    if "extrinsic_world_to_color" in camera_payload:
+        extrinsic = np.asarray(camera_payload["extrinsic_world_to_color"], dtype=np.float32)
+        rotation = extrinsic[:3, :3]
+        translation = extrinsic[:3, 3]
+        if str(camera_payload.get("extrinsic_world_to_color_unit", "")).lower() == "cm":
+            translation = translation * 0.01
+    else:
+        rotation = np.asarray(camera_payload["R"], dtype=np.float32)
+        translation = np.asarray(camera_payload["T"], dtype=np.float32)
+
+    return CameraParameters(
+        intrinsics=np.ascontiguousarray(intrinsics.astype(np.float32, copy=False)),
+        rotation=np.ascontiguousarray(rotation.astype(np.float32, copy=False)),
+        translation=np.ascontiguousarray(translation.astype(np.float32, copy=False)),
+    )
+
+
 def transform_smpl_world_to_camera(
     *,
     global_orient: np.ndarray,

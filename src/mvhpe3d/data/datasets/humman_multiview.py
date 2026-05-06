@@ -219,11 +219,7 @@ class HuMManStage1Dataset(Dataset[dict[str, Any]]):
         camera_rotations = []
         camera_translation_vectors = []
         for camera_id in camera_ids:
-            camera = load_camera_parameters(
-                self.cameras_dir,
-                sequence_id=record.sequence_id,
-                camera_id=camera_id,
-            )
+            camera = self._load_camera_parameters(record=record, camera_id=camera_id)
             camera_global_orient, camera_transl = transform_smpl_world_to_camera(
                 global_orient=world_global_orient,
                 transl=world_transl,
@@ -248,6 +244,13 @@ class HuMManStage1Dataset(Dataset[dict[str, Any]]):
                 np.stack(camera_translations, axis=0).astype(np.float32, copy=False)
             ),
         }
+
+    def _load_camera_parameters(self, *, record: SampleRecord, camera_id: str):
+        return load_camera_parameters(
+            self.cameras_dir,
+            sequence_id=record.sequence_id,
+            camera_id=camera_id,
+        )
 
     @staticmethod
     def _frame_id_to_index(frame_id: str) -> int:

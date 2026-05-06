@@ -1,0 +1,41 @@
+cross_camera_split:
+  train_dataset:
+    split: null
+    cameras: [kinect_002, kinect_003, kinect_004, kinect_005, kinect_006, kinect_008, kinect_010]
+    subjects: null
+    actions: null
+  val_dataset:
+    split: null
+    cameras: [kinect_001, kinect_007, kinect_009]
+    subjects: null
+    actions: null
+  test_dataset:
+    split: null
+    cameras: [kinect_001, kinect_007, kinect_009]
+    subjects: null
+    actions: null
+
+random_split:
+  ratio: 0.8
+  random_seed: 0
+  partition_by: sequence_id
+  candidate_dataset:
+    split: null
+    cameras: null
+    subjects: null
+    actions: null
+  train_dataset:
+    split: null
+    cameras: null
+    subjects: null
+    actions: null
+  val_dataset:
+    split: null
+    cameras: null
+    subjects: null
+    actions: null
+  test_dataset:
+    split: null
+    cameras: null
+    subjects: null
+    actions: null

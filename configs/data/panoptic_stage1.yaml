@@ -1,0 +1,27 @@
+name: "panoptic_stage1"
+manifest_path: "/opt/data/panoptic_kinoptic_single_actor_cropped/panoptic_stage1_manifest_visible.json"
+
+# Panoptic Stage 1 reads native cropped camera metadata from:
+#   <cameras_dir>/<sequence_id>/meta/cameras_kinect_cropped.json
+# The manifest should be visibility-filtered so empty/offscreen crops are not
+# treated as valid full-image SAM3DBody inputs. Generate it with:
+#   uv run python scripts/filter_panoptic_stage1_manifest.py \
+#     --dataset-root /opt/data/panoptic_kinoptic_single_actor_cropped
+#
+# The training target is still SMPL-compatible. Raw Panoptic gt3d/*.npy joints
+# must be fitted or converted offline. Use either:
+# - per-frame target_path entries in the manifest, or
+# - --gt-smpl-dir /path/to/smpl_cache containing
+#   <sequence_id>_smpl_params.npz files with a frame_ids array.
+gt_smpl_dir: null
+cameras_dir: "/opt/data/panoptic_kinoptic_single_actor_cropped"
+
+split_config_path: "configs/data/panoptic_stage1_splits.yaml"
+split_name: "cross_camera_split"
+num_views: 2
+batch_size: 256
+num_workers: 0
+seed: 0
+pin_memory: true
+persistent_workers: false
+drop_last_train: true

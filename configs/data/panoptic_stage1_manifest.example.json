@@ -1,0 +1,35 @@
+{
+  "samples": [
+    {
+      "sample_id": "170307_dance5_frame00001011",
+      "sequence_id": "170307_dance5",
+      "frame_id": "00001011",
+      "split": null,
+      "subject_id": null,
+      "action_id": "dance5",
+      "target_path": "/opt/data/panoptic_kinoptic_single_actor_cropped/smpl/170307_dance5/00001011.npz",
+      "views": [
+        {
+          "camera_id": "kinect_001",
+          "npz_path": "/opt/data/panoptic_kinoptic_single_actor_cropped/sam3dbody/170307_dance5_kinect_001_00001011.npz"
+        },
+        {
+          "camera_id": "kinect_002",
+          "npz_path": "/opt/data/panoptic_kinoptic_single_actor_cropped/sam3dbody/170307_dance5_kinect_002_00001011.npz"
+        },
+        {
+          "camera_id": "kinect_003",
+          "npz_path": "/opt/data/panoptic_kinoptic_single_actor_cropped/sam3dbody/170307_dance5_kinect_003_00001011.npz"
+        },
+        {
+          "camera_id": "kinect_007",
+          "npz_path": "/opt/data/panoptic_kinoptic_single_actor_cropped/sam3dbody/170307_dance5_kinect_007_00001011.npz"
+        },
+        {
+          "camera_id": "kinect_009",
+          "npz_path": "/opt/data/panoptic_kinoptic_single_actor_cropped/sam3dbody/170307_dance5_kinect_009_00001011.npz"
+        }
+      ]
+    }
+  ]
+}

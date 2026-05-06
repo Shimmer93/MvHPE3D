@@ -33,7 +33,11 @@ from mvhpe3d.models import (
     Stage3TemporalRefineConfig,
     Stage3TemporalRefineModel,
 )
-from mvhpe3d.utils import load_experiment_config
+from mvhpe3d.utils import (
+    PANOPTIC_EVAL_JOINT_INDICES,
+    PANOPTIC_EVAL_SMPL24_INDICES,
+    load_experiment_config,
+)
 
 
 def _load_train_script_module():
@@ -142,7 +146,9 @@ def test_stage3_temporal_refine_model_zero_init_matches_stage2_baseline() -> Non
         outputs["pose_residual_6d"],
         torch.zeros_like(outputs["pose_residual_6d"]),
     )
-    assert torch.equal(outputs["betas_residual"], torch.zeros_like(outputs["betas_residual"]))
+    assert torch.equal(
+        outputs["betas_residual"], torch.zeros_like(outputs["betas_residual"])
+    )
     assert torch.equal(outputs["base_pose_6d"], base_pose_6d)
     assert torch.equal(outputs["base_betas"], base_betas)
     assert torch.equal(outputs["pred_pose_6d"], base_pose_6d)
@@ -196,7 +202,9 @@ class _EchoStage2Backbone(nn.Module):
         }
 
 
-def test_stage3_lightning_module_zero_init_matches_frozen_stage2_center_prediction() -> None:
+def test_stage3_lightning_module_zero_init_matches_frozen_stage2_center_prediction() -> (
+    None
+):
     config = Stage3TemporalRefineConfig(
         hidden_dim=32,
         temporal_dim=16,
@@ -228,12 +236,16 @@ def test_stage3_lightning_module_zero_init_matches_frozen_stage2_center_predicti
         outputs["pose_residual_6d"],
         torch.zeros_like(outputs["pose_residual_6d"]),
     )
-    assert torch.equal(outputs["betas_residual"], torch.zeros_like(outputs["betas_residual"]))
+    assert torch.equal(
+        outputs["betas_residual"], torch.zeros_like(outputs["betas_residual"])
+    )
     assert torch.equal(outputs["pred_pose_6d"], expected_pose_6d)
     assert torch.equal(outputs["pred_betas"], expected_betas)
 
 
-def test_stage3_lightning_module_causal_zero_init_matches_last_stage2_prediction() -> None:
+def test_stage3_lightning_module_causal_zero_init_matches_last_stage2_prediction() -> (
+    None
+):
     config = Stage3TemporalRefineConfig(
         hidden_dim=32,
         temporal_dim=16,
@@ -314,7 +326,11 @@ def test_stage2_lightning_module_validation_step_adds_joint_metrics(
             "pa_mpjpe": __import__("torch").tensor(5.0),
         },
     )
-    monkeypatch.setattr(module, "_compute_canonical_joint_loss", lambda **_: __import__("torch").tensor(0.0))
+    monkeypatch.setattr(
+        module,
+        "_compute_canonical_joint_loss",
+        lambda **_: __import__("torch").tensor(0.0),
+    )
 
     metrics = module._shared_step(batch, stage="val")
 
@@ -342,7 +358,11 @@ def test_stage2_lightning_module_disabling_betas_zeros_beta_losses(
     module = Stage2FusionLightningModule(
         model_config=Stage2ParamRefineConfig(learn_betas=False),
     )
-    monkeypatch.setattr(module, "_compute_canonical_joint_loss", lambda **_: __import__("torch").tensor(0.0))
+    monkeypatch.setattr(
+        module,
+        "_compute_canonical_joint_loss",
+        lambda **_: __import__("torch").tensor(0.0),
+    )
 
     metrics = module._shared_step(batch, stage="train")
 
@@ -377,8 +397,6 @@ def test_stage2_lightning_module_test_step_uses_camera_metrics(
 
     assert "test/mpjpe" in metrics
     assert "test/pa_mpjpe" in metrics
-
-
 
 
 def test_stage3_lightning_module_training_step(
@@ -453,7 +471,9 @@ def test_load_stage2_experiment_config_resolves_sections() -> None:
 
 
 def test_load_stage2_joint_residual_experiment_config_resolves_sections() -> None:
-    experiment = load_experiment_config("configs/experiment/stage2_cross_camera_joint_residual.yaml")
+    experiment = load_experiment_config(
+        "configs/experiment/stage2_cross_camera_joint_residual.yaml"
+    )
 
     assert experiment["experiment_name"] == "stage2_cross_camera_joint_residual"
     assert experiment["data"]["name"] == "humman_stage2"
@@ -471,7 +491,9 @@ def test_load_stage2_joint_graph_refiner_experiment_config_resolves_sections() -
 
 
 def test_load_stage3_experiment_config_resolves_sections() -> None:
-    experiment = load_experiment_config("configs/experiment/stage3_temporal_refine.yaml")
+    experiment = load_experiment_config(
+        "configs/experiment/stage3_temporal_refine.yaml"
+    )
 
     assert experiment["experiment_name"] == "stage3_temporal_refine"
     assert experiment["data"]["name"] == "humman_stage3"
@@ -479,7 +501,9 @@ def test_load_stage3_experiment_config_resolves_sections() -> None:
 
 
 def test_load_stage3_causal_experiment_config_resolves_sections() -> None:
-    experiment = load_experiment_config("configs/experiment/stage3_temporal_refine_causal.yaml")
+    experiment = load_experiment_config(
+        "configs/experiment/stage3_temporal_refine_causal.yaml"
+    )
 
     assert experiment["experiment_name"] == "stage3_temporal_refine_causal"
     assert experiment["data"]["name"] == "humman_stage3"
@@ -570,11 +594,109 @@ def test_stage1_lightning_module_test_step_adds_input_view_metrics(
     assert metrics["test/input_avg_pa_mpjpe"].item() == 11.0
 
 
+def test_stage1_test_metrics_use_converted_input_smpl_translation() -> None:
+    module = Stage1FusionLightningModule(model_config=Stage1MLPFusionConfig())
+    converted_transl = torch.tensor(
+        [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+        dtype=torch.float32,
+    )
+    input_view_smpl_params = {
+        "body_pose": torch.zeros(2, 69),
+        "betas": torch.zeros(2, 10),
+        "global_orient": torch.zeros(2, 3),
+        "transl": converted_transl,
+    }
+    pred_cam_t = torch.full((1, 2, 3), 100.0)
+    used_translations: list[torch.Tensor] = []
+
+    def fake_build_smpl_joints(**kwargs):
+        used_translations.append(kwargs["transl"].detach().clone())
+        return kwargs["transl"][:, None, :].expand(kwargs["transl"].shape[0], 24, 3)
+
+    module._build_smpl_joints = fake_build_smpl_joints
+
+    module._compute_test_joint_metrics(
+        pred_body_pose=torch.zeros(1, 69),
+        pred_betas=torch.zeros(1, 10),
+        target_body_pose=torch.zeros(1, 69),
+        target_betas=torch.zeros(1, 10),
+        target_aux={},
+        pred_cam_t=pred_cam_t,
+        input_view_smpl_params=input_view_smpl_params,
+    )
+    module._compute_input_view_joint_metrics(
+        input_view_smpl_params=input_view_smpl_params,
+        target_body_pose=torch.zeros(1, 69),
+        target_betas=torch.zeros(1, 10),
+        target_aux={},
+        pred_cam_t=pred_cam_t,
+    )
+
+    assert used_translations
+    for transl in used_translations:
+        assert torch.equal(transl, converted_transl)
+
+
+def test_stage1_panoptic_input_metrics_use_native_camera_gt_root_centering() -> None:
+    module = Stage1FusionLightningModule(model_config=Stage1MLPFusionConfig())
+    panoptic_template = torch.zeros(19, 3, dtype=torch.float32)
+    selected_template = torch.stack(
+        [
+            torch.tensor(
+                [
+                    float(index % 4) * 0.1,
+                    float(index // 4) * 0.05,
+                    float(index % 3) * 0.02,
+                ],
+                dtype=torch.float32,
+            )
+            for index in range(len(PANOPTIC_EVAL_JOINT_INDICES))
+        ],
+        dim=0,
+    )
+    for column, panoptic_index in enumerate(PANOPTIC_EVAL_JOINT_INDICES):
+        panoptic_template[panoptic_index] = selected_template[column]
+
+    def fake_build_smpl_joints(**kwargs):
+        transl = kwargs["transl"].detach().cpu()
+        joints = torch.zeros(transl.shape[0], 24, 3, dtype=torch.float32)
+        for column, smpl_index in enumerate(PANOPTIC_EVAL_SMPL24_INDICES):
+            joints[:, smpl_index, :] = selected_template[column] + transl
+        return joints
+
+    module._build_smpl_joints = fake_build_smpl_joints
+    target_aux = {
+        "panoptic_joints_world": panoptic_template[None],
+        "panoptic_confidence": torch.ones(1, 19, dtype=torch.float32),
+        "camera_rotation": torch.eye(3, dtype=torch.float32)
+        .reshape(1, 1, 3, 3)
+        .expand(1, 2, 3, 3),
+        "camera_translation": torch.tensor([[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]]),
+    }
+    input_view_smpl_params = {
+        "body_pose": torch.zeros(2, 69),
+        "betas": torch.zeros(2, 10),
+        "global_orient": torch.zeros(2, 3),
+        "transl": torch.tensor([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]),
+    }
+
+    metrics = module._compute_panoptic_input_view_joint_metrics(
+        input_view_smpl_params=input_view_smpl_params,
+        target_aux=target_aux,
+    )
+
+    assert metrics["mpjpe"].item() < 1e-6
+    assert metrics["pa_mpjpe"].item() < 1e-6
+    assert torch.isclose(metrics["abs_mpjpe"], torch.tensor(0.5))
+
+
 def test_load_experiment_config_resolves_sections() -> None:
     experiment = load_experiment_config("configs/experiment/stage1_cross_camera.yaml")
 
     assert experiment["experiment_name"] == "stage1_cross_camera"
-    assert experiment["data"]["manifest_path"].endswith("humman_stage1_manifest.example.json")
+    assert experiment["data"]["manifest_path"].endswith(
+        "humman_stage1_manifest.example.json"
+    )
     assert experiment["data"]["split_name"] == "cross_camera_split"
     assert experiment["model"]["input_dim"] == 249
     assert experiment["trainer"]["max_epochs"] == 100
@@ -635,7 +757,9 @@ def test_train_script_build_data_config_overrides_split_selection() -> None:
     assert data_config.split_name == "random_split"
 
 
-def test_train_script_build_trainer_config_overrides_multi_gpu_settings(monkeypatch) -> None:
+def test_train_script_build_trainer_config_overrides_multi_gpu_settings(
+    monkeypatch,
+) -> None:
     train_module = _load_train_script_module()
     monkeypatch.setattr(train_module, "build_optional_wandb_logger", lambda **_: None)
     args = Namespace(
@@ -692,7 +816,9 @@ def test_build_loggers_adds_wandb_when_available(monkeypatch) -> None:
         pass
 
     dummy_logger = DummyWandbLogger()
-    monkeypatch.setattr(train_module, "build_optional_wandb_logger", lambda **_: dummy_logger)
+    monkeypatch.setattr(
+        train_module, "build_optional_wandb_logger", lambda **_: dummy_logger
+    )
 
     logger = train_module.build_loggers(
         root_dir=Path("/tmp/outputs"),

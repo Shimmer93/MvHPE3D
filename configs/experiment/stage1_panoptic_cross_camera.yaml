@@ -1,0 +1,19 @@
+name: "stage1_panoptic_cross_camera"
+
+data:
+  config: "configs/data/panoptic_stage1.yaml"
+
+model:
+  config: "configs/model/stage1_mlp.yaml"
+
+loss:
+  body_pose_weight: 1.0
+  betas_weight: 0.1
+  joint_weight: 1.0
+
+optimizer:
+  learning_rate: 0.001
+  weight_decay: 0.00001
+
+trainer:
+  config: "configs/trainer/default.yaml"

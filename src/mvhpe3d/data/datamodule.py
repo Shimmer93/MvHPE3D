@@ -9,7 +9,12 @@ import lightning as L
 from torch.utils.data import DataLoader
 
 from .collate import multiview_collate
-from .datasets import HuMManStage1Dataset, HuMManStage2Dataset, HuMManStage3Dataset
+from .datasets import (
+    HuMManStage1Dataset,
+    HuMManStage2Dataset,
+    HuMManStage3Dataset,
+    PanopticStage1Dataset,
+)
 from .splits import filter_records_by_split, load_sample_records, resolve_split_records
 
 
@@ -18,6 +23,7 @@ class Stage1DataConfig:
     """Configuration for the Stage 1 HuMMan LightningDataModule."""
 
     manifest_path: str
+    name: str = "humman_stage1"
     gt_smpl_dir: str | None = None
     cameras_dir: str | None = None
     split_config_path: str | None = None
@@ -48,9 +54,8 @@ class Stage1HuMManDataModule(L.LightningDataModule):
         manifest_path = Path(self.config.manifest_path)
         if not manifest_path.exists():
             raise FileNotFoundError(f"Manifest does not exist: {manifest_path}")
-        gt_smpl_dir = self._resolve_gt_smpl_dir()
-        if not gt_smpl_dir.exists():
-            raise FileNotFoundError(f"GT SMPL directory does not exist: {gt_smpl_dir}")
+        records = load_sample_records(manifest_path)
+        self._validate_stage1_target_sources(records)
         cameras_dir = self._resolve_cameras_dir()
         if not cameras_dir.exists():
             raise FileNotFoundError(f"Cameras directory does not exist: {cameras_dir}")
@@ -64,9 +69,10 @@ class Stage1HuMManDataModule(L.LightningDataModule):
         selected_records = self._resolve_dataset_records(records)
         gt_smpl_dir = self._resolve_gt_smpl_dir()
         cameras_dir = self._resolve_cameras_dir()
+        dataset_cls = self._stage1_dataset_cls()
 
         if stage in (None, "fit"):
-            self.train_dataset = HuMManStage1Dataset(
+            self.train_dataset = dataset_cls(
                 selected_records["train"],
                 num_views=self.config.num_views,
                 train=True,
@@ -74,7 +80,7 @@ class Stage1HuMManDataModule(L.LightningDataModule):
                 cameras_dir=cameras_dir,
                 seed=self.config.seed,
             )
-            self.val_dataset = HuMManStage1Dataset(
+            self.val_dataset = dataset_cls(
                 selected_records["val"],
                 num_views=self.config.num_views,
                 train=False,
@@ -84,7 +90,7 @@ class Stage1HuMManDataModule(L.LightningDataModule):
             )
 
         if stage in (None, "validate") and self.val_dataset is None:
-            self.val_dataset = HuMManStage1Dataset(
+            self.val_dataset = dataset_cls(
                 selected_records["val"],
                 num_views=self.config.num_views,
                 train=False,
@@ -94,7 +100,7 @@ class Stage1HuMManDataModule(L.LightningDataModule):
             )
 
         if stage in (None, "test"):
-            self.test_dataset = HuMManStage1Dataset(
+            self.test_dataset = dataset_cls(
                 selected_records["test"],
                 num_views=self.config.num_views,
                 train=False,
@@ -172,6 +178,47 @@ class Stage1HuMManDataModule(L.LightningDataModule):
 
         manifest_path = Path(self.config.manifest_path).resolve()
         return (manifest_path.parent / "cameras").resolve()
+
+    def _validate_stage1_target_sources(self, records: list) -> None:
+        gt_smpl_dir = self._resolve_gt_smpl_dir()
+        if self.config.name != "panoptic_stage1":
+            if not gt_smpl_dir.exists():
+                raise FileNotFoundError(f"GT SMPL directory does not exist: {gt_smpl_dir}")
+            return
+
+        target_paths = [record.target_path for record in records if record.target_path is not None]
+        if target_paths and len(target_paths) == len(records):
+            missing_paths = [path for path in target_paths if not path.exists()]
+            if missing_paths:
+                preview = "\n".join(f"  - {path}" for path in missing_paths[:10])
+                suffix = "" if len(missing_paths) <= 10 else f"\n  ... and {len(missing_paths) - 10} more"
+                raise FileNotFoundError(
+                    "Panoptic manifest contains per-frame target_path entries, "
+                    f"but some target SMPL files are missing:\n{preview}{suffix}"
+                )
+            return
+
+        if not gt_smpl_dir.exists():
+            raise FileNotFoundError(
+                "Panoptic Stage 1 requires SMPL supervision targets. The SAM3DBody "
+                "prediction exporter only creates per-view input predictions; it does "
+                "not create GT SMPL targets from Panoptic gt3d/*.npy. Provide either "
+                "per-frame manifest target_path files, or create a sequence cache at "
+                f"{gt_smpl_dir} containing <sequence_id>_smpl_params.npz files with "
+                "global_orient, body_pose, betas, transl, and preferably frame_ids. "
+                "For the current Panoptic layout, run: "
+                "uv run python scripts/precompute_panoptic_gt_smpl.py "
+                f"--dataset-root {self._resolve_cameras_dir()} "
+                f"--output-dir {gt_smpl_dir} "
+                f"--manifest-path {Path(self.config.manifest_path).resolve()}"
+            )
+
+    def _stage1_dataset_cls(self):
+        if self.config.name == "panoptic_stage1":
+            return PanopticStage1Dataset
+        if self.config.name == "humman_stage1":
+            return HuMManStage1Dataset
+        raise ValueError(f"Unsupported Stage 1 dataset name: {self.config.name}")
 
 
 @dataclass(slots=True)
