@@ -271,6 +271,7 @@ projected with the saved per-view `cam_int`.
 **Future beyond Stage 2**:
 - Add explicit per-view relative camera prediction for reprojection and image-space visualization
 - Explore stronger set encoders or optimization-based fusion methods after the parameter-space baseline is stable
+- Multi-human scenes will need cross-view person association before fusion; see [docs/stage4_multi_human_association.md](docs/stage4_multi_human_association.md).
 
 ## Evaluation
 

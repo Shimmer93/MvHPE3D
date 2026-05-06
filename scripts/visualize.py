@@ -307,7 +307,7 @@ def main() -> None:
 
 def build_data_config(config: dict[str, Any], args: argparse.Namespace) -> Stage1DataConfig:
     data_kwargs = dict(config)
-    data_kwargs.pop("name", None)
+    data_name = str(data_kwargs.pop("name", "humman_stage1"))
     data_kwargs.pop("_config_path", None)
 
     if args.manifest_path is not None:
@@ -323,6 +323,7 @@ def build_data_config(config: dict[str, Any], args: argparse.Namespace) -> Stage
     if args.seed is not None:
         data_kwargs["seed"] = args.seed
 
+    data_kwargs["name"] = data_name
     return Stage1DataConfig(**data_kwargs)
 
 

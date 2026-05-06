@@ -449,6 +449,7 @@ def build_data_config(
             data_kwargs["input_smpl_cache_dir"] = args.input_smpl_cache_dir
         return Stage2DataConfig(**data_kwargs)
 
+    data_kwargs["name"] = data_name
     return Stage1DataConfig(**data_kwargs)
 
 
@@ -608,7 +609,7 @@ def compute_prediction_joint_metrics(
     repeated_target_body_pose = expand_per_view_tensor(target_body_pose, num_views=num_views)
     repeated_target_betas = expand_per_view_tensor(target_betas, num_views=num_views)
     input_global_orient = input_view_smpl_params["global_orient"].to(pred_body_pose.device)
-    input_transl = pred_cam_t.reshape(batch_size * num_views, 3).to(pred_body_pose.device)
+    input_transl = input_view_smpl_params["transl"].to(pred_body_pose.device)
     pred_joints = module._build_smpl_joints(
         body_pose=repeated_pred_body_pose,
         betas=repeated_pred_betas,
@@ -640,7 +641,7 @@ def compute_input_joint_metrics(
     repeated_target_body_pose = expand_per_view_tensor(target_body_pose, num_views=num_views)
     repeated_target_betas = expand_per_view_tensor(target_betas, num_views=num_views)
     input_global_orient = input_view_smpl_params["global_orient"].to(target_body_pose.device)
-    input_transl = pred_cam_t.reshape(batch_size * num_views, 3).to(target_body_pose.device)
+    input_transl = input_view_smpl_params["transl"].to(target_body_pose.device)
     pred_joints = module._build_smpl_joints(
         body_pose=input_view_smpl_params["body_pose"].to(target_body_pose.device),
         betas=input_view_smpl_params["betas"].to(target_betas.device),

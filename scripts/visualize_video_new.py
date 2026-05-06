@@ -365,7 +365,7 @@ def compute_frame_input_view_mpjpe(
         input_body_pose = input_view_smpl["body_pose"][view_index : view_index + 1]
         input_betas = input_view_smpl["betas"][view_index : view_index + 1]
         input_global_orient = input_view_smpl["global_orient"][view_index : view_index + 1]
-        input_transl = pred_cam_t[:, view_index, :]
+        input_transl = input_view_smpl["transl"][view_index : view_index + 1]
         pred_joints = module._build_smpl_joints(
             body_pose=input_body_pose,
             betas=input_betas,

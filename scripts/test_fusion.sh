@@ -70,6 +70,7 @@ STAGE="${DEFAULT_STAGE}"
 OUTPUT_ROOT="${DEFAULT_OUTPUT_ROOT}"
 OUTPUT_PATH=""
 MHR_ASSETS_DIR=""
+INPUT_SMPL_CACHE_DIR=""
 PASSTHROUGH_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -162,6 +163,14 @@ while [[ $# -gt 0 ]]; do
             MHR_ASSETS_DIR="$2"
             shift 2
             ;;
+        --input-smpl-cache-dir)
+            if [[ $# -lt 2 ]]; then
+                echo "error: --input-smpl-cache-dir requires a value" >&2
+                exit 1
+            fi
+            INPUT_SMPL_CACHE_DIR="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -233,6 +242,10 @@ fi
 
 if [[ -n "${MHR_ASSETS_DIR}" ]]; then
     CMD+=(--mhr-assets-dir "${MHR_ASSETS_DIR}")
+fi
+
+if [[ -n "${INPUT_SMPL_CACHE_DIR}" ]]; then
+    CMD+=(--input-smpl-cache-dir "${INPUT_SMPL_CACHE_DIR}")
 fi
 
 if [[ ${#PASSTHROUGH_ARGS[@]} -gt 0 ]]; then
