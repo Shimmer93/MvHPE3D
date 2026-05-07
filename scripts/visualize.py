@@ -323,7 +323,6 @@ def build_data_config(config: dict[str, Any], args: argparse.Namespace) -> Stage
     if args.seed is not None:
         data_kwargs["seed"] = args.seed
 
-    data_kwargs["name"] = data_name
     return Stage1DataConfig(**data_kwargs)
 
 

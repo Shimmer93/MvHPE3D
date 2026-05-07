@@ -449,7 +449,6 @@ def build_data_config(
             data_kwargs["input_smpl_cache_dir"] = args.input_smpl_cache_dir
         return Stage2DataConfig(**data_kwargs)
 
-    data_kwargs["name"] = data_name
     return Stage1DataConfig(**data_kwargs)
 
 

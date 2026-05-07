@@ -233,7 +233,6 @@ def build_data_config(
     if data_name == "humman_stage2":
         return Stage2DataConfig(**data_kwargs)
 
-    data_kwargs["name"] = data_name
     return Stage1DataConfig(**data_kwargs)
 
 
