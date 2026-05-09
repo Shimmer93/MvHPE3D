@@ -22,6 +22,8 @@ class HuMManStage3Dataset(HuMManStage2Dataset):
     - ``target_body_pose``: target-frame canonical target SMPL body pose
     - ``target_body_pose_6d``: target-frame target pose in 6D rotation form
     - ``target_betas``: target-frame target SMPL shape coefficients
+    - ``window_target_body_pose_6d`` / ``window_target_betas``: per-frame
+      canonical targets used for optional joint Stage 2 + Stage 3 training
     - ``meta``: target-frame ids plus the full temporal window frame ids
     """
 
@@ -94,6 +96,8 @@ class HuMManStage3Dataset(HuMManStage2Dataset):
             )
 
         temporal_inputs: list[np.ndarray] = []
+        window_target_body_pose_6d: list[np.ndarray] = []
+        window_target_betas: list[np.ndarray] = []
         window_frame_ids: list[str] = []
         window_view_npz_paths: list[list[str]] = []
         for offset in self._window_offsets():
@@ -107,6 +111,9 @@ class HuMManStage3Dataset(HuMManStage2Dataset):
                 frame_inputs.append(self._build_stage2_input(fitted_payload))
                 frame_npz_paths.append(str(view.npz_path))
             temporal_inputs.append(np.stack(frame_inputs, axis=0))
+            frame_canonical_target = self._load_canonical_target(frame_record)
+            window_target_body_pose_6d.append(frame_canonical_target["target_body_pose_6d"])
+            window_target_betas.append(frame_canonical_target["target_betas"])
             window_frame_ids.append(frame_record.frame_id)
             window_view_npz_paths.append(frame_npz_paths)
 
@@ -117,6 +124,10 @@ class HuMManStage3Dataset(HuMManStage2Dataset):
             "target_body_pose": torch.from_numpy(canonical_target["target_body_pose"]),
             "target_body_pose_6d": torch.from_numpy(canonical_target["target_body_pose_6d"]),
             "target_betas": torch.from_numpy(canonical_target["target_betas"]),
+            "window_target_body_pose_6d": torch.from_numpy(
+                np.stack(window_target_body_pose_6d, axis=0)
+            ),
+            "window_target_betas": torch.from_numpy(np.stack(window_target_betas, axis=0)),
             "view_aux": {
                 key: torch.from_numpy(np.stack(values, axis=0))
                 for key, values in view_aux.items()

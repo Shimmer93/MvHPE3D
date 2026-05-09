@@ -9,7 +9,12 @@ import lightning as L
 from torch.utils.data import DataLoader
 
 from .collate import multiview_collate
-from .datasets import HuMManStage1Dataset, HuMManStage2Dataset, HuMManStage3Dataset
+from .datasets import (
+    HuMManStage1Dataset,
+    HuMManStage2Dataset,
+    HuMManStage3Dataset,
+    HuMManStage3TokenDataset,
+)
 from .splits import filter_records_by_split, load_sample_records, resolve_split_records
 
 
@@ -209,6 +214,9 @@ class Stage3DataConfig:
     num_views: int = 2
     window_size: int = 9
     causal: bool = False
+    representation: str = "dense_window"
+    token_sampling: str = "dense_sync"
+    token_drop_prob: float = 0.5
     batch_size: int = 16
     num_workers: int = 0
     train_split: str = "train"
@@ -384,9 +392,9 @@ class Stage3HuMManDataModule(L.LightningDataModule):
     def __init__(self, config: Stage3DataConfig) -> None:
         super().__init__()
         self.config = config
-        self.train_dataset: HuMManStage3Dataset | None = None
-        self.val_dataset: HuMManStage3Dataset | None = None
-        self.test_dataset: HuMManStage3Dataset | None = None
+        self.train_dataset: HuMManStage3Dataset | HuMManStage3TokenDataset | None = None
+        self.val_dataset: HuMManStage3Dataset | HuMManStage3TokenDataset | None = None
+        self.test_dataset: HuMManStage3Dataset | HuMManStage3TokenDataset | None = None
 
     def prepare_data(self) -> None:
         manifest_path = Path(self.config.manifest_path)
@@ -411,6 +419,11 @@ class Stage3HuMManDataModule(L.LightningDataModule):
                 "Centered Stage 3 window_size must be a positive odd integer, "
                 f"got {self.config.window_size}"
             )
+        if self.config.representation not in {"dense_window", "view_time_tokens"}:
+            raise ValueError(
+                "Stage 3 representation must be 'dense_window' or 'view_time_tokens', "
+                f"got {self.config.representation!r}"
+            )
         if self.config.split_config_path is not None:
             split_config_path = Path(self.config.split_config_path)
             if not split_config_path.exists():
@@ -424,32 +437,24 @@ class Stage3HuMManDataModule(L.LightningDataModule):
         input_smpl_cache_dir = self._resolve_input_smpl_cache_dir()
 
         if stage in (None, "fit"):
-            self.train_dataset = HuMManStage3Dataset(
+            self.train_dataset = self._build_stage3_dataset(
                 selected_records["train"],
-                num_views=self.config.num_views,
                 train=True,
                 gt_smpl_dir=gt_smpl_dir,
                 cameras_dir=cameras_dir,
                 input_smpl_cache_dir=input_smpl_cache_dir,
-                window_size=self.config.window_size,
-                causal=self.config.causal,
-                seed=self.config.seed,
             )
             self._assert_dataset_not_empty(
                 self.train_dataset,
                 split_name="train",
                 selected_records=selected_records,
             )
-            self.val_dataset = HuMManStage3Dataset(
+            self.val_dataset = self._build_stage3_dataset(
                 selected_records["val"],
-                num_views=self.config.num_views,
                 train=False,
                 gt_smpl_dir=gt_smpl_dir,
                 cameras_dir=cameras_dir,
                 input_smpl_cache_dir=input_smpl_cache_dir,
-                window_size=self.config.window_size,
-                causal=self.config.causal,
-                seed=self.config.seed,
             )
             self._assert_dataset_not_empty(
                 self.val_dataset,
@@ -458,16 +463,12 @@ class Stage3HuMManDataModule(L.LightningDataModule):
             )
 
         if stage in (None, "validate") and self.val_dataset is None:
-            self.val_dataset = HuMManStage3Dataset(
+            self.val_dataset = self._build_stage3_dataset(
                 selected_records["val"],
-                num_views=self.config.num_views,
                 train=False,
                 gt_smpl_dir=gt_smpl_dir,
                 cameras_dir=cameras_dir,
                 input_smpl_cache_dir=input_smpl_cache_dir,
-                window_size=self.config.window_size,
-                causal=self.config.causal,
-                seed=self.config.seed,
             )
             self._assert_dataset_not_empty(
                 self.val_dataset,
@@ -476,16 +477,12 @@ class Stage3HuMManDataModule(L.LightningDataModule):
             )
 
         if stage in (None, "test"):
-            self.test_dataset = HuMManStage3Dataset(
+            self.test_dataset = self._build_stage3_dataset(
                 selected_records["test"],
-                num_views=self.config.num_views,
                 train=False,
                 gt_smpl_dir=gt_smpl_dir,
                 cameras_dir=cameras_dir,
                 input_smpl_cache_dir=input_smpl_cache_dir,
-                window_size=self.config.window_size,
-                causal=self.config.causal,
-                seed=self.config.seed,
             )
             self._assert_dataset_not_empty(
                 self.test_dataset,
@@ -514,7 +511,7 @@ class Stage3HuMManDataModule(L.LightningDataModule):
 
     def _build_dataloader(
         self,
-        dataset: HuMManStage3Dataset,
+        dataset: HuMManStage3Dataset | HuMManStage3TokenDataset,
         *,
         shuffle: bool,
         drop_last: bool,
@@ -531,6 +528,34 @@ class Stage3HuMManDataModule(L.LightningDataModule):
             drop_last=drop_last,
             collate_fn=multiview_collate,
         )
+
+    def _build_stage3_dataset(
+        self,
+        records: list,
+        *,
+        train: bool,
+        gt_smpl_dir: Path,
+        cameras_dir: Path,
+        input_smpl_cache_dir: Path,
+    ) -> HuMManStage3Dataset | HuMManStage3TokenDataset:
+        common_kwargs = {
+            "num_views": self.config.num_views,
+            "train": train,
+            "gt_smpl_dir": gt_smpl_dir,
+            "cameras_dir": cameras_dir,
+            "input_smpl_cache_dir": input_smpl_cache_dir,
+            "window_size": self.config.window_size,
+            "causal": self.config.causal,
+            "seed": self.config.seed,
+        }
+        if self.config.representation == "view_time_tokens":
+            return HuMManStage3TokenDataset(
+                records,
+                token_sampling=self.config.token_sampling,
+                token_drop_prob=self.config.token_drop_prob,
+                **common_kwargs,
+            )
+        return HuMManStage3Dataset(records, **common_kwargs)
 
     def _resolve_dataset_records(self, records: list) -> dict[str, list]:
         if self.config.split_config_path is not None:
@@ -572,7 +597,7 @@ class Stage3HuMManDataModule(L.LightningDataModule):
 
     def _assert_dataset_not_empty(
         self,
-        dataset: HuMManStage3Dataset,
+        dataset: HuMManStage3Dataset | HuMManStage3TokenDataset,
         *,
         split_name: str,
         selected_records: dict[str, list],

@@ -114,6 +114,7 @@ class Stage3LossConfig:
     articulation_weight: float = 0.0
     pose_residual_weight: float = 0.0
     betas_residual_weight: float = 0.0
+    stage2_aux_weight: float = 0.0
     supervise_betas: bool = True
 
 

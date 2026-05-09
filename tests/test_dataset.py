@@ -13,7 +13,12 @@ from mvhpe3d.data import (
     Stage3DataConfig,
     Stage3HuMManDataModule,
 )
-from mvhpe3d.data.datasets import HuMManStage1Dataset, HuMManStage2Dataset, HuMManStage3Dataset
+from mvhpe3d.data.datasets import (
+    HuMManStage1Dataset,
+    HuMManStage2Dataset,
+    HuMManStage3Dataset,
+    HuMManStage3TokenDataset,
+)
 from mvhpe3d.data.splits import (
     filter_records_by_split,
     load_sample_records,
@@ -235,6 +240,8 @@ def test_stage3_dataset_uses_only_cameras_shared_across_window(tmp_path: Path) -
     sample = dataset[1]
 
     assert tuple(sample["views_input"].shape) == (3, 2, 148)
+    assert tuple(sample["window_target_body_pose_6d"].shape) == (3, 23, 6)
+    assert tuple(sample["window_target_betas"].shape) == (3, 10)
     assert sample["meta"]["camera_ids"] == ["kinect_000", "kinect_001"]
 
 
@@ -261,6 +268,58 @@ def test_stage3_causal_dataset_uses_past_window(
     assert sample["meta"]["window_frame_ids"] == ["000001", "000002", "000003"]
     assert sample["meta"]["target_window_index"] == 2
     assert sample["meta"]["causal"] is True
+
+
+def test_stage3_token_dataset_returns_view_time_tokens(
+    sample_manifest: Path,
+    sample_input_smpl_cache: Path,
+) -> None:
+    records = load_sample_records(sample_manifest)
+    dataset = HuMManStage3TokenDataset(
+        records,
+        num_views=2,
+        train=False,
+        gt_smpl_dir=sample_manifest.parent / "smpl",
+        cameras_dir=sample_manifest.parent / "cameras",
+        input_smpl_cache_dir=sample_input_smpl_cache,
+        window_size=3,
+        token_sampling="sparse_interleaved",
+    )
+
+    sample = dataset[1]
+
+    assert tuple(sample["views_input"].shape) == (2, 148)
+    assert tuple(sample["view_time_tokens"].shape) == (6, 148)
+    assert tuple(sample["token_time_offsets"].shape) == (6,)
+    assert tuple(sample["token_camera_indices"].shape) == (6,)
+    assert tuple(sample["token_valid_mask"].shape) == (6,)
+    assert sample["token_valid_mask"].any()
+    assert sample["meta"]["token_sampling"] == "sparse_interleaved"
+    assert sample["meta"]["target_window_index"] == 1
+
+
+def test_stage3_token_datamodule_builds_token_batches(
+    sample_manifest: Path,
+    sample_input_smpl_cache: Path,
+) -> None:
+    datamodule = Stage3HuMManDataModule(
+        Stage3DataConfig(
+            manifest_path=str(sample_manifest),
+            input_smpl_cache_dir=str(sample_input_smpl_cache),
+            num_views=2,
+            window_size=3,
+            representation="view_time_tokens",
+            token_sampling="dense_sync",
+            batch_size=1,
+            drop_last_train=False,
+        )
+    )
+    datamodule.setup("fit")
+    batch = next(iter(datamodule.train_dataloader()))
+
+    assert tuple(batch["views_input"].shape) == (1, 2, 148)
+    assert tuple(batch["view_time_tokens"].shape) == (1, 6, 148)
+    assert tuple(batch["token_valid_mask"].shape) == (1, 6)
 
 
 def test_resolve_split_records_filters_views_by_named_policy(

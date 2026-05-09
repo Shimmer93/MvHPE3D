@@ -18,6 +18,7 @@ from mvhpe3d.data import (
 from mvhpe3d.lightning import (
     Stage1FusionLightningModule,
     Stage2FusionLightningModule,
+    Stage3OptimizationConfig,
     Stage3TemporalLightningModule,
 )
 from mvhpe3d.losses import Stage3Loss, Stage3LossConfig
@@ -32,6 +33,8 @@ from mvhpe3d.models import (
     Stage2ParamRefineModel,
     Stage3TemporalRefineConfig,
     Stage3TemporalRefineModel,
+    Stage3ViewTimeTokenConfig,
+    Stage3ViewTimeTokenModel,
 )
 from mvhpe3d.utils import load_experiment_config
 
@@ -117,6 +120,33 @@ def test_stage3_temporal_refine_model_forward_shapes() -> None:
     assert tuple(outputs["pred_pose_6d"].shape) == (2, 23, 6)
     assert tuple(outputs["pred_body_pose"].shape) == (2, 69)
     assert tuple(outputs["pred_betas"].shape) == (2, 10)
+
+
+def test_stage3_view_time_token_model_forward_shapes() -> None:
+    config = Stage3ViewTimeTokenConfig(
+        hidden_dim=32,
+        token_dim=16,
+        transformer_layers=1,
+        transformer_heads=4,
+        transformer_ff_dim=64,
+        head_layers=2,
+        max_camera_index=16,
+    )
+    model = Stage3ViewTimeTokenModel(config)
+    outputs = model(
+        view_time_tokens=torch.zeros(2, 6, config.token_input_dim),
+        token_time_offsets=torch.tensor([[-1, -1, 0, 0, 1, 1], [-1, -1, 0, 0, 1, 1]]),
+        token_camera_indices=torch.tensor([[0, 1, 0, 1, 0, 1], [0, 1, 0, 1, 0, 1]]),
+        token_valid_mask=torch.ones(2, 6, dtype=torch.bool),
+        base_pose_6d=torch.zeros(2, 23, 6),
+        base_betas=torch.zeros(2, 10),
+    )
+
+    assert tuple(outputs["base_pose_6d"].shape) == (2, 23, 6)
+    assert tuple(outputs["pred_pose_6d"].shape) == (2, 23, 6)
+    assert tuple(outputs["pred_body_pose"].shape) == (2, 69)
+    assert tuple(outputs["pred_betas"].shape) == (2, 10)
+    assert tuple(outputs["valid_token_count"].shape) == (2,)
 
 
 def test_stage3_temporal_refine_model_zero_init_matches_stage2_baseline() -> None:
@@ -260,6 +290,66 @@ def test_stage3_lightning_module_causal_zero_init_matches_last_stage2_prediction
     assert torch.equal(outputs["stage2_pred_betas"], expected_betas)
     assert torch.equal(outputs["pred_pose_6d"], expected_pose_6d)
     assert torch.equal(outputs["pred_betas"], expected_betas)
+
+
+def test_stage3_lightning_module_joint_training_uses_backbone_lr_scale() -> None:
+    config = Stage3TemporalRefineConfig(
+        hidden_dim=32,
+        temporal_dim=16,
+        temporal_layers=1,
+        head_layers=2,
+        freeze_backbone=False,
+    )
+    module = Stage3TemporalLightningModule(
+        model_config=config,
+        optimization_config=Stage3OptimizationConfig(
+            learning_rate=1e-3,
+            weight_decay=0.0,
+            stage2_backbone_lr_scale=0.05,
+        ),
+        stage2_backbone_model=_EchoStage2Backbone(),
+    )
+
+    optimizer = module.configure_optimizers()
+
+    assert any(parameter.requires_grad for parameter in module.stage2_backbone.parameters())
+    assert len(optimizer.param_groups) == 2
+    assert optimizer.param_groups[0]["lr"] == 1e-3
+    assert optimizer.param_groups[1]["lr"] == 5e-5
+
+
+def test_stage3_token_lightning_module_zero_init_matches_stage2_target_prediction() -> None:
+    config = Stage3ViewTimeTokenConfig(
+        hidden_dim=32,
+        token_dim=16,
+        transformer_layers=1,
+        transformer_heads=4,
+        transformer_ff_dim=64,
+        head_layers=2,
+        max_camera_index=16,
+    )
+    module = Stage3TemporalLightningModule(
+        model_config=config,
+        stage2_backbone_model=_EchoStage2Backbone(),
+    )
+    batch = {
+        "views_input": torch.randn(2, 3, config.token_input_dim),
+        "view_time_tokens": torch.randn(2, 6, config.token_input_dim),
+        "token_time_offsets": torch.tensor([[-1, -1, 0, 0, 1, 1], [-1, -1, 0, 0, 1, 1]]),
+        "token_camera_indices": torch.tensor([[0, 1, 0, 1, 0, 1], [0, 1, 0, 1, 0, 1]]),
+        "token_valid_mask": torch.ones(2, 6, dtype=torch.bool),
+    }
+
+    outputs = module.forward_token_batch(batch)
+
+    with torch.no_grad():
+        stage2_outputs = module.stage2_backbone(batch["views_input"])
+    assert torch.equal(outputs["stage2_pred_pose_6d"], stage2_outputs["pred_pose_6d"])
+    assert torch.equal(outputs["stage2_pred_betas"], stage2_outputs["pred_betas"])
+    assert torch.equal(outputs["base_pose_6d"], stage2_outputs["pred_pose_6d"])
+    assert torch.equal(outputs["base_betas"], stage2_outputs["pred_betas"])
+    assert torch.equal(outputs["pred_pose_6d"], stage2_outputs["pred_pose_6d"])
+    assert torch.equal(outputs["pred_betas"], stage2_outputs["pred_betas"])
 
 
 def test_stage2_lightning_module_training_step(
@@ -411,6 +501,55 @@ def test_stage3_lightning_module_training_step(
     assert loss.ndim == 0
 
 
+def test_stage3_lightning_module_joint_training_logs_stage2_aux_loss(
+    sample_manifest: Path,
+    sample_input_smpl_cache: Path,
+) -> None:
+    datamodule = Stage3HuMManDataModule(
+        Stage3DataConfig(
+            manifest_path=str(sample_manifest),
+            input_smpl_cache_dir=str(sample_input_smpl_cache),
+            num_views=2,
+            window_size=3,
+            batch_size=1,
+            drop_last_train=False,
+        )
+    )
+    datamodule.setup("fit")
+    batch = next(iter(datamodule.train_dataloader()))
+
+    module = Stage3TemporalLightningModule(
+        model_config=Stage3TemporalRefineConfig(
+            hidden_dim=32,
+            temporal_dim=16,
+            temporal_layers=1,
+            head_layers=2,
+            freeze_backbone=False,
+        ),
+        loss_config=Stage3LossConfig(
+            pose_6d_weight=1.0,
+            betas_weight=0.0,
+            joint_weight=0.0,
+            articulation_weight=0.0,
+            pose_residual_weight=0.0,
+            stage2_aux_weight=2.0,
+        ),
+        stage2_backbone_model=_EchoStage2Backbone(),
+    )
+    monkeypatch_torch = __import__("torch")
+    dummy_joints = monkeypatch_torch.zeros(1, 24, 3)
+    module._runtime_cache["smpl_eval_model"] = lambda **_: None
+    module._build_smpl_joints = lambda **_: dummy_joints
+
+    metrics = module._shared_step(batch, stage="train")
+
+    assert metrics["train/loss_stage2_aux"] > 0.0
+    assert torch.isclose(
+        metrics["train/loss"],
+        metrics["train/loss_pose_6d"] + metrics["train/loss_stage2_aux"] * 2.0,
+    )
+
+
 def test_stage3_lightning_module_test_step_uses_camera_metrics(
     sample_manifest: Path,
     sample_input_smpl_cache: Path,
@@ -442,6 +581,46 @@ def test_stage3_lightning_module_test_step_uses_camera_metrics(
 
     assert "test/mpjpe" in metrics
     assert "test/pa_mpjpe" in metrics
+
+
+def test_stage3_token_lightning_module_training_step(
+    sample_manifest: Path,
+    sample_input_smpl_cache: Path,
+) -> None:
+    datamodule = Stage3HuMManDataModule(
+        Stage3DataConfig(
+            manifest_path=str(sample_manifest),
+            input_smpl_cache_dir=str(sample_input_smpl_cache),
+            num_views=2,
+            window_size=3,
+            representation="view_time_tokens",
+            token_sampling="dense_sync",
+            batch_size=1,
+            drop_last_train=False,
+        )
+    )
+    datamodule.setup("fit")
+    batch = next(iter(datamodule.train_dataloader()))
+
+    module = Stage3TemporalLightningModule(
+        model_config=Stage3ViewTimeTokenConfig(
+            hidden_dim=32,
+            token_dim=16,
+            transformer_layers=1,
+            transformer_heads=4,
+            transformer_ff_dim=64,
+            head_layers=2,
+            max_camera_index=16,
+        ),
+        stage2_backbone_model=Stage2JointResidualModel(Stage2JointResidualConfig()),
+    )
+    monkeypatch_torch = __import__("torch")
+    dummy_joints = monkeypatch_torch.zeros(1, 24, 3)
+    module._runtime_cache["smpl_eval_model"] = lambda **_: None
+    module._build_smpl_joints = lambda **_: dummy_joints
+    loss = module.training_step(batch, 0)
+
+    assert loss.ndim == 0
 
 
 def test_load_stage2_experiment_config_resolves_sections() -> None:
@@ -486,6 +665,41 @@ def test_load_stage3_causal_experiment_config_resolves_sections() -> None:
     assert experiment["data"]["causal"] is True
     assert experiment["model"]["name"] == "stage3_temporal_refine"
     assert experiment["model"]["causal"] is True
+
+
+def test_load_stage3_joint_train_experiment_config_resolves_sections() -> None:
+    experiment = load_experiment_config("configs/experiment/stage3_temporal_refine_joint_train.yaml")
+
+    assert experiment["experiment_name"] == "stage3_temporal_refine_joint_train"
+    assert experiment["data"]["name"] == "humman_stage3"
+    assert experiment["model"]["name"] == "stage3_temporal_refine"
+    assert experiment["model"]["freeze_backbone"] is False
+    assert experiment["loss"]["stage2_aux_weight"] == 0.25
+    assert experiment["optimizer"]["stage2_backbone_lr_scale"] == 0.1
+
+
+def test_load_stage3_e2e_scratch_experiment_config_resolves_sections() -> None:
+    experiment = load_experiment_config(
+        "configs/experiment/stage3_temporal_refine_e2e_scratch.yaml"
+    )
+
+    assert experiment["experiment_name"] == "stage3_temporal_refine_e2e_scratch"
+    assert experiment["data"]["name"] == "humman_stage3"
+    assert experiment["model"]["name"] == "stage3_temporal_refine"
+    assert experiment["model"]["freeze_backbone"] is False
+    assert experiment["model"]["learn_betas"] is True
+    assert experiment["loss"]["stage2_aux_weight"] == 1.0
+    assert experiment["loss"]["betas_weight"] == 0.1
+    assert experiment["optimizer"]["stage2_backbone_lr_scale"] == 1.0
+
+
+def test_load_stage3_view_time_token_experiment_config_resolves_sections() -> None:
+    experiment = load_experiment_config("configs/experiment/stage3_view_time_token.yaml")
+
+    assert experiment["experiment_name"] == "stage3_view_time_token"
+    assert experiment["data"]["name"] == "humman_stage3"
+    assert experiment["data"]["representation"] == "view_time_tokens"
+    assert experiment["model"]["name"] == "stage3_view_time_token"
 
 
 def test_stage1_lightning_module_validation_step_adds_joint_metrics(

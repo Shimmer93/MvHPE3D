@@ -1,0 +1,16 @@
+name: "stage3_view_time_token"
+backbone_name: "stage2_joint_graph_refiner"
+learn_betas: false
+hidden_dim: 512
+token_dim: 256
+token_encoder_layers: 2
+transformer_layers: 3
+transformer_heads: 4
+transformer_ff_dim: 1024
+head_layers: 3
+dropout: 0.1
+pose_residual_scale: 0.05
+betas_residual_scale: 0.05
+max_camera_index: 256
+max_time_offset: 16
+freeze_backbone: true

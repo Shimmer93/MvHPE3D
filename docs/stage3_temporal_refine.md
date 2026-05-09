@@ -101,6 +101,66 @@ This backbone is typically frozen.
 
 So Stage 3 does not relearn multiview fusion from scratch. It builds on top of an existing Stage 2 model.
 
+## Joint Stage 2 + Stage 3 Training
+
+The default Stage 3 experiments keep the Stage 2 backbone frozen. There is also a joint-training variant for fine-tuning Stage 2 and Stage 3 together:
+
+```text
+configs/experiment/stage3_temporal_refine_joint_train.yaml
+```
+
+This variant sets:
+
+```yaml
+freeze_backbone: false
+stage2_aux_weight: 0.25
+stage2_backbone_lr_scale: 0.1
+```
+
+The optimizer uses two parameter groups:
+
+- Stage 3 temporal module: normal learning rate
+- Stage 2 backbone: `learning_rate * stage2_backbone_lr_scale`
+
+The training loss adds an auxiliary Stage 2 loss on the dense temporal window:
+
+$$
+L = L_{\text{stage3 target}} + \lambda_{\text{stage2}} L_{\text{stage2 window}}.
+$$
+
+For dense Stage 3 batches, $L_{\text{stage2 window}}$ supervises the Stage 2 prediction for every frame in the temporal window against that frame's canonical target. This is intended to prevent the unfrozen Stage 2 backbone from drifting away from good per-frame fusion while still allowing temporal gradients to tune the backbone.
+
+The recommended use is not random end-to-end training. Start from a good Stage 2 checkpoint and fine-tune:
+
+```bash
+uv run python scripts/train.py \
+  --config configs/experiment/stage3_temporal_refine_joint_train.yaml \
+  --stage2-checkpoint-path outputs/stage2/stage2_cross_camera_joint_graph_refiner/version_1/checkpoints/epoch=080-step=015390.ckpt
+```
+
+There is also an explicit scratch end-to-end variant:
+
+```text
+configs/experiment/stage3_temporal_refine_e2e_scratch.yaml
+```
+
+This variant does not pass `--stage2-checkpoint-path`, so the Stage 2 backbone is initialized from scratch. It uses stronger direct Stage 2 supervision and a full Stage 2 learning rate:
+
+```yaml
+learn_betas: true
+stage2_aux_weight: 1.0
+stage2_backbone_lr_scale: 1.0
+```
+
+Run it as:
+
+```bash
+uv run python scripts/train.py \
+  --config configs/experiment/stage3_temporal_refine_e2e_scratch.yaml
+```
+
+This is a diagnostic baseline, not the main recommended recipe. It tests whether joint optimization can discover the Stage 2 fusion backbone and the Stage 3 temporal residual together, without relying on a pretrained Stage 2 checkpoint.
+
 ### 2. Build one temporal feature vector per frame
 
 For each frame, Stage 3 concatenates:

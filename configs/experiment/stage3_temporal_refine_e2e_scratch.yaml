@@ -1,0 +1,26 @@
+name: "stage3_temporal_refine_e2e_scratch"
+
+data:
+  config: "configs/data/humman_stage3.yaml"
+
+model:
+  config: "configs/model/stage3_temporal_refine_e2e_scratch.yaml"
+
+loss:
+  pose_6d_weight: 1.0
+  betas_weight: 0.1
+  joint_weight: 1.0
+  articulation_weight: 0.1
+  pose_residual_weight: 0.05
+  betas_residual_weight: 0.005
+  stage2_aux_weight: 1.0
+
+optimizer:
+  learning_rate: 0.0005
+  weight_decay: 0.00001
+  stage2_backbone_lr_scale: 1.0
+
+trainer:
+  config: "configs/trainer/default.yaml"
+  gradient_clip_val: 0.5
+  gradient_clip_algorithm: "norm"

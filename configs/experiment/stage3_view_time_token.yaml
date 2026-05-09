@@ -1,0 +1,24 @@
+name: "stage3_view_time_token"
+
+data:
+  config: "configs/data/humman_stage3_view_time_token.yaml"
+
+model:
+  config: "configs/model/stage3_view_time_token.yaml"
+
+loss:
+  pose_6d_weight: 1.0
+  betas_weight: 0.0
+  joint_weight: 1.0
+  articulation_weight: 0.1
+  pose_residual_weight: 0.05
+  betas_residual_weight: 0.0
+
+optimizer:
+  learning_rate: 0.0003
+  weight_decay: 0.00001
+
+trainer:
+  config: "configs/trainer/default.yaml"
+  gradient_clip_val: 0.5
+  gradient_clip_algorithm: "norm"

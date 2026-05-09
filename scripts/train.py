@@ -37,6 +37,7 @@ from mvhpe3d.models import (
     Stage2JointResidualConfig,
     Stage2ParamRefineConfig,
     Stage3TemporalRefineConfig,
+    Stage3ViewTimeTokenConfig,
 )
 from mvhpe3d.utils import load_experiment_config, validate_mhr_asset_folder
 
@@ -246,6 +247,7 @@ def build_model_config(
     | Stage2JointResidualConfig
     | Stage2ParamRefineConfig
     | Stage3TemporalRefineConfig
+    | Stage3ViewTimeTokenConfig
 ):
     model_kwargs = dict(config)
     model_name = str(model_kwargs.pop("name", "stage1_mlp_fusion"))
@@ -258,6 +260,10 @@ def build_model_config(
         if args.disable_learn_betas:
             model_kwargs["learn_betas"] = False
         return Stage3TemporalRefineConfig(**model_kwargs)
+    if model_name == "stage3_view_time_token":
+        if args.disable_learn_betas:
+            model_kwargs["learn_betas"] = False
+        return Stage3ViewTimeTokenConfig(**model_kwargs)
     if model_name == "stage2_joint_residual":
         if args.disable_learn_betas:
             model_kwargs["learn_betas"] = False
@@ -284,6 +290,7 @@ def build_loss_config(
         | Stage2JointResidualConfig
         | Stage2ParamRefineConfig
         | Stage3TemporalRefineConfig
+        | Stage3ViewTimeTokenConfig
     ),
 ) -> Stage1LossConfig | Stage2LossConfig | Stage3LossConfig:
     loss_kwargs = dict(config)
@@ -300,7 +307,7 @@ def build_loss_config(
             loss_kwargs["betas_weight"] = 0.0
             loss_kwargs["init_betas_weight"] = 0.0
         return Stage2LossConfig(**loss_kwargs)
-    if isinstance(model_config, Stage3TemporalRefineConfig):
+    if isinstance(model_config, (Stage3TemporalRefineConfig, Stage3ViewTimeTokenConfig)):
         if args.disable_learn_betas:
             loss_kwargs["supervise_betas"] = False
             loss_kwargs["betas_weight"] = 0.0
@@ -321,9 +328,10 @@ def build_optimization_config(
         | Stage2JointResidualConfig
         | Stage2ParamRefineConfig
         | Stage3TemporalRefineConfig
+        | Stage3ViewTimeTokenConfig
     ),
 ) -> Stage1OptimizationConfig | Stage2OptimizationConfig | Stage3OptimizationConfig:
-    if isinstance(model_config, Stage3TemporalRefineConfig):
+    if isinstance(model_config, (Stage3TemporalRefineConfig, Stage3ViewTimeTokenConfig)):
         return Stage3OptimizationConfig(**config)
     if isinstance(
         model_config,
@@ -514,7 +522,7 @@ def build_lightning_module(
     data_config: Stage1DataConfig | Stage2DataConfig | Stage3DataConfig,
     args: argparse.Namespace,
 ):
-    if isinstance(model_config, Stage3TemporalRefineConfig):
+    if isinstance(model_config, (Stage3TemporalRefineConfig, Stage3ViewTimeTokenConfig)):
         return Stage3TemporalLightningModule(
             model_config=model_config,
             loss_config=loss_config,
@@ -554,6 +562,7 @@ def is_stage2_or_stage3_experiment(experiment: dict[str, Any]) -> bool:
         "stage2_joint_residual",
         "stage2_joint_graph_refiner",
         "stage3_temporal_refine",
+        "stage3_view_time_token",
     } or data_name in {"humman_stage2", "humman_stage3"}
 
 

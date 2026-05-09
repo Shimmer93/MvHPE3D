@@ -37,6 +37,7 @@ from mvhpe3d.models import (
     Stage2JointResidualConfig,
     Stage2ParamRefineConfig,
     Stage3TemporalRefineConfig,
+    Stage3ViewTimeTokenConfig,
 )
 from mvhpe3d.utils import load_experiment_config, validate_mhr_asset_folder
 
@@ -213,6 +214,8 @@ def build_model_config(
 
     if model_name == "stage3_temporal_refine":
         return Stage3TemporalRefineConfig(**model_kwargs)
+    if model_name == "stage3_view_time_token":
+        return Stage3ViewTimeTokenConfig(**model_kwargs)
     if model_name == "stage2_joint_graph_refiner":
         return Stage2JointGraphRefinerConfig(**model_kwargs)
     if model_name == "stage2_joint_residual":
@@ -291,7 +294,7 @@ def load_eval_module(
     data_config: Stage1DataConfig | Stage2DataConfig | Stage3DataConfig,
     args: argparse.Namespace,
 ):
-    if isinstance(model_config, Stage3TemporalRefineConfig):
+    if isinstance(model_config, (Stage3TemporalRefineConfig, Stage3ViewTimeTokenConfig)):
         return Stage3TemporalLightningModule.load_from_checkpoint(
             checkpoint_path,
             map_location="cpu",
@@ -355,6 +358,7 @@ def is_stage2_or_stage3_experiment(experiment: dict[str, Any]) -> bool:
         "stage2_joint_residual",
         "stage2_joint_graph_refiner",
         "stage3_temporal_refine",
+        "stage3_view_time_token",
     } or data_name in {"humman_stage2", "humman_stage3"}
 
 
