@@ -28,6 +28,7 @@ from mvhpe3d.data import (
 from mvhpe3d.lightning import (
     Stage1FusionLightningModule,
     Stage2FusionLightningModule,
+    Stage2RRGBGuidedResidualRefinerLightningModule,
     Stage3TemporalLightningModule,
 )
 from mvhpe3d.models import (
@@ -36,6 +37,7 @@ from mvhpe3d.models import (
     Stage2JointGraphRefinerConfig,
     Stage2JointResidualConfig,
     Stage2ParamRefineConfig,
+    Stage2RRGBGuidedResidualRefinerConfig,
     Stage3TemporalRefineConfig,
     Stage3ViewTimeTokenConfig,
 )
@@ -103,10 +105,16 @@ def parse_args() -> argparse.Namespace:
         help="Optional directory for caching fitted SMPL parameters converted from input views",
     )
     parser.add_argument(
+        "--rgb-feature-cache-dir",
+        type=str,
+        default=None,
+        help="Optional Stage 2 RGB feature cache directory from scripts/precompute_rgb_features.py",
+    )
+    parser.add_argument(
         "--stage2-checkpoint-path",
         type=str,
         default=None,
-        help="Optional Stage 2 checkpoint path used when loading a Stage 3 model manually",
+        help="Optional Stage 2 checkpoint path used by Stage 3 or RGB residual refinement",
     )
     parser.add_argument(
         "--pred-camera-mode",
@@ -192,8 +200,12 @@ def build_data_config(
         data_kwargs["split_name"] = args.split_name
     if args.seed is not None:
         data_kwargs["seed"] = args.seed
-    if data_name in {"humman_stage2", "humman_stage3"} and args.input_smpl_cache_dir is not None:
-        data_kwargs["input_smpl_cache_dir"] = args.input_smpl_cache_dir
+    input_smpl_cache_dir = getattr(args, "input_smpl_cache_dir", None)
+    if data_name in {"humman_stage2", "humman_stage3"} and input_smpl_cache_dir is not None:
+        data_kwargs["input_smpl_cache_dir"] = input_smpl_cache_dir
+    rgb_feature_cache_dir = getattr(args, "rgb_feature_cache_dir", None)
+    if data_name == "humman_stage2" and rgb_feature_cache_dir is not None:
+        data_kwargs["rgb_feature_cache_dir"] = rgb_feature_cache_dir
 
     if data_name == "humman_stage3":
         return Stage3DataConfig(**data_kwargs)
@@ -218,6 +230,8 @@ def build_model_config(
         return Stage3ViewTimeTokenConfig(**model_kwargs)
     if model_name == "stage2_joint_graph_refiner":
         return Stage2JointGraphRefinerConfig(**model_kwargs)
+    if model_name == "stage2r_rgb_guided_residual_refiner":
+        return Stage2RRGBGuidedResidualRefinerConfig(**model_kwargs)
     if model_name == "stage2_joint_residual":
         return Stage2JointResidualConfig(**model_kwargs)
     if model_name == "stage2_param_refine":
@@ -294,6 +308,19 @@ def load_eval_module(
     data_config: Stage1DataConfig | Stage2DataConfig | Stage3DataConfig,
     args: argparse.Namespace,
 ):
+    if isinstance(model_config, Stage2RRGBGuidedResidualRefinerConfig):
+        kwargs = {
+            "map_location": "cpu",
+            "model_config": model_config,
+            "smpl_model_path": args.smpl_model_path,
+            "strict": False,
+        }
+        if args.stage2_checkpoint_path is not None:
+            kwargs["stage2_checkpoint_path"] = args.stage2_checkpoint_path
+        return Stage2RRGBGuidedResidualRefinerLightningModule.load_from_checkpoint(
+            checkpoint_path,
+            **kwargs,
+        )
     if isinstance(model_config, (Stage3TemporalRefineConfig, Stage3ViewTimeTokenConfig)):
         return Stage3TemporalLightningModule.load_from_checkpoint(
             checkpoint_path,
@@ -357,6 +384,7 @@ def is_stage2_or_stage3_experiment(experiment: dict[str, Any]) -> bool:
         "stage2_param_refine",
         "stage2_joint_residual",
         "stage2_joint_graph_refiner",
+        "stage2r_rgb_guided_residual_refiner",
         "stage3_temporal_refine",
         "stage3_view_time_token",
     } or data_name in {"humman_stage2", "humman_stage3"}

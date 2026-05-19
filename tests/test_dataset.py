@@ -115,6 +115,28 @@ def test_humman_stage2_dataset_returns_expected_schema(
     assert sample["meta"]["sample_id"] == "sample_train"
 
 
+def test_humman_stage2_dataset_loads_rgb_features(
+    sample_manifest: Path,
+    sample_input_smpl_cache: Path,
+    sample_rgb_feature_cache: Path,
+) -> None:
+    records = filter_records_by_split(load_sample_records(sample_manifest), "train")
+    dataset = HuMManStage2Dataset(
+        records,
+        num_views=2,
+        train=False,
+        gt_smpl_dir=sample_manifest.parent / "smpl",
+        cameras_dir=sample_manifest.parent / "cameras",
+        input_smpl_cache_dir=sample_input_smpl_cache,
+        rgb_feature_cache_dir=sample_rgb_feature_cache,
+    )
+
+    sample = dataset[0]
+
+    assert tuple(sample["views_input"].shape) == (2, 148)
+    assert tuple(sample["view_rgb_feature"].shape) == (2, 384)
+
+
 def test_stage2_datamodule_builds_train_val_and_test_batches(
     sample_manifest: Path,
     sample_input_smpl_cache: Path,
@@ -140,6 +162,34 @@ def test_stage2_datamodule_builds_train_val_and_test_batches(
     assert tuple(val_batch["views_input"].shape) == (1, 2, 148)
     assert tuple(test_batch["views_input"].shape) == (1, 2, 148)
     assert tuple(train_batch["target_body_pose_6d"].shape) == (1, 23, 6)
+
+
+def test_stage2_datamodule_passes_rgb_features(
+    sample_manifest: Path,
+    sample_input_smpl_cache: Path,
+    sample_rgb_feature_cache: Path,
+) -> None:
+    datamodule = Stage2HuMManDataModule(
+        Stage2DataConfig(
+            manifest_path=str(sample_manifest),
+            input_smpl_cache_dir=str(sample_input_smpl_cache),
+            rgb_feature_cache_dir=str(sample_rgb_feature_cache),
+            num_views=2,
+            batch_size=1,
+            drop_last_train=False,
+        )
+    )
+
+    datamodule.prepare_data()
+    datamodule.setup(None)
+
+    train_batch = next(iter(datamodule.train_dataloader()))
+    val_batch = next(iter(datamodule.val_dataloader()))
+    test_batch = next(iter(datamodule.test_dataloader()))
+
+    assert tuple(train_batch["view_rgb_feature"].shape) == (1, 2, 384)
+    assert tuple(val_batch["view_rgb_feature"].shape) == (1, 2, 384)
+    assert tuple(test_batch["view_rgb_feature"].shape) == (1, 2, 384)
 
 
 def test_stage3_dataset_uses_only_cameras_shared_across_window(tmp_path: Path) -> None:

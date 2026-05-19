@@ -8,6 +8,10 @@ from typing import Any
 import numpy as np
 import torch
 
+from mvhpe3d.data.rgb_features import (
+    load_rgb_feature_payload,
+    resolve_rgb_feature_cache_path,
+)
 from mvhpe3d.utils import axis_angle_to_rotation_6d, cache_path_for_source_npz
 
 from ..canonicalization import canonicalize_stage2_target
@@ -35,6 +39,7 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
         gt_smpl_dir: str | Path,
         cameras_dir: str | Path,
         input_smpl_cache_dir: str | Path,
+        rgb_feature_cache_dir: str | Path | None = None,
         seed: int = 0,
     ) -> None:
         super().__init__(
@@ -46,9 +51,15 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
             seed=seed,
         )
         self.input_smpl_cache_dir = Path(input_smpl_cache_dir).resolve()
+        self.rgb_feature_cache_dir = (
+            Path(rgb_feature_cache_dir).resolve()
+            if rgb_feature_cache_dir is not None
+            else None
+        )
         self._input_smpl_cache: dict[str, dict[str, np.ndarray]] = {}
         self._stage2_input_cache: dict[str, np.ndarray] = {}
         self._canonical_target_cache: dict[tuple[str, str], dict[str, np.ndarray]] = {}
+        self._rgb_feature_cache: dict[str, np.ndarray] = {}
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         record = self.records[index]
@@ -62,6 +73,7 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
             "input_global_orient": [],
             "input_transl": [],
         }
+        view_rgb_features: list[np.ndarray] = []
         camera_ids: list[str] = []
 
         for view in selected_views:
@@ -81,6 +93,14 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
             view_aux["input_transl"].append(
                 self._require_field(fitted_payload, "transl", expected_last_dim=3)
             )
+            if self.rgb_feature_cache_dir is not None:
+                view_rgb_features.append(
+                    self._load_rgb_feature(
+                        sequence_id=record.sequence_id,
+                        camera_id=view.camera_id,
+                        frame_id=record.frame_id,
+                    )
+                )
             camera_ids.append(view.camera_id)
 
         target_payload = self._load_gt_target(record)
@@ -91,7 +111,7 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
             target_payload=target_payload,
         )
 
-        return {
+        sample = {
             "views_input": torch.from_numpy(np.stack(view_inputs, axis=0)),
             "target_body_pose": torch.from_numpy(canonical_target["target_body_pose"]),
             "target_body_pose_6d": torch.from_numpy(canonical_target["target_body_pose_6d"]),
@@ -120,6 +140,11 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
                 "view_npz_paths": [str(view.npz_path) for view in selected_views],
             },
         }
+        if self.rgb_feature_cache_dir is not None:
+            sample["view_rgb_feature"] = torch.from_numpy(
+                np.stack(view_rgb_features, axis=0)
+            )
+        return sample
 
     def _load_cached_input_smpl(self, source_npz_path: Path) -> dict[str, np.ndarray]:
         cache_key = str(source_npz_path.resolve())
@@ -172,3 +197,26 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
         )
         self._canonical_target_cache[cache_key] = cached
         return cached
+
+    def _load_rgb_feature(
+        self,
+        *,
+        sequence_id: str,
+        camera_id: str,
+        frame_id: str,
+    ) -> np.ndarray:
+        if self.rgb_feature_cache_dir is None:
+            raise RuntimeError("rgb_feature_cache_dir is not configured")
+        cache_path = resolve_rgb_feature_cache_path(
+            self.rgb_feature_cache_dir,
+            sequence_id=sequence_id,
+            camera_id=camera_id,
+            frame_id=frame_id,
+        )
+        cache_key = str(cache_path)
+        cached = self._rgb_feature_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        feature = load_rgb_feature_payload(cache_path)
+        self._rgb_feature_cache[cache_key] = feature
+        return feature

@@ -13,6 +13,8 @@ from .stage2 import (
     Stage2JointResidualModel,
     Stage2ParamRefineConfig,
     Stage2ParamRefineModel,
+    Stage2RRGBGuidedResidualRefinerConfig,
+    Stage2RRGBGuidedResidualRefinerModel,
 )
 from .stage3 import (
     Stage3TemporalRefineConfig,
@@ -32,6 +34,8 @@ __all__ = [
     "Stage2JointResidualModel",
     "Stage2ParamRefineConfig",
     "Stage2ParamRefineModel",
+    "Stage2RRGBGuidedResidualRefinerConfig",
+    "Stage2RRGBGuidedResidualRefinerModel",
     "Stage3TemporalRefineConfig",
     "Stage3TemporalRefineModel",
     "Stage3ViewTimeTokenConfig",
