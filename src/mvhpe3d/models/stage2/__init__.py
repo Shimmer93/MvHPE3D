@@ -3,6 +3,10 @@
 from .joint_graph_refiner import Stage2JointGraphRefinerConfig, Stage2JointGraphRefinerModel
 from .joint_residual import Stage2JointResidualConfig, Stage2JointResidualModel
 from .param_refine import Stage2ParamRefineConfig, Stage2ParamRefineModel
+from .stage2r_rgb_guided_residual_refiner import (
+    Stage2RRGBGuidedResidualRefinerConfig,
+    Stage2RRGBGuidedResidualRefinerModel,
+)
 
 __all__ = [
     "Stage2JointGraphRefinerConfig",
@@ -11,4 +15,6 @@ __all__ = [
     "Stage2JointResidualModel",
     "Stage2ParamRefineConfig",
     "Stage2ParamRefineModel",
+    "Stage2RRGBGuidedResidualRefinerConfig",
+    "Stage2RRGBGuidedResidualRefinerModel",
 ]

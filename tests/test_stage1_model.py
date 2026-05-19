@@ -18,10 +18,12 @@ from mvhpe3d.data import (
 from mvhpe3d.lightning import (
     Stage1FusionLightningModule,
     Stage2FusionLightningModule,
+    Stage2OptimizationConfig,
+    Stage2RRGBGuidedResidualRefinerLightningModule,
     Stage3OptimizationConfig,
     Stage3TemporalLightningModule,
 )
-from mvhpe3d.losses import Stage3Loss, Stage3LossConfig
+from mvhpe3d.losses import Stage2Loss, Stage2LossConfig, Stage3Loss, Stage3LossConfig
 from mvhpe3d.models import (
     Stage1MLPFusionConfig,
     Stage1MLPFusionModel,
@@ -31,6 +33,8 @@ from mvhpe3d.models import (
     Stage2JointResidualModel,
     Stage2ParamRefineConfig,
     Stage2ParamRefineModel,
+    Stage2RRGBGuidedResidualRefinerConfig,
+    Stage2RRGBGuidedResidualRefinerModel,
     Stage3TemporalRefineConfig,
     Stage3TemporalRefineModel,
     Stage3ViewTimeTokenConfig,
@@ -106,6 +110,36 @@ def test_stage2_joint_graph_refiner_model_forward_shapes() -> None:
     assert tuple(outputs["pred_betas"].shape) == (2, 10)
     assert tuple(outputs["view_weights"].shape) == (2, 3)
     assert tuple(outputs["pose_view_weights"].shape) == (2, 3, 23)
+
+
+def test_stage2r_rgb_guided_residual_refiner_model_zero_init_matches_stage2_prediction() -> None:
+    config = Stage2RRGBGuidedResidualRefinerConfig(
+        hidden_dim=32,
+        latent_dim=16,
+        encoder_layers=1,
+        residual_layers=2,
+        dropout=0.0,
+        rgb_projection_dim=8,
+        rgb_hidden_dim=8,
+        rgb_layers=1,
+    )
+    model = Stage2RRGBGuidedResidualRefinerModel(config)
+    views_input = torch.randn(2, 3, config.input_dim)
+    stage2_outputs = _EchoStage2Backbone()(views_input)
+    view_rgb_feature = torch.randn(2, 3, config.rgb_feature_dim)
+
+    outputs = model(
+        views_input,
+        view_rgb_feature=view_rgb_feature,
+        stage2_outputs=stage2_outputs,
+    )
+
+    assert torch.equal(outputs["pred_pose_6d"], stage2_outputs["pred_pose_6d"])
+    assert torch.equal(outputs["pred_betas"], stage2_outputs["pred_betas"])
+    assert torch.equal(
+        outputs["stage2r_pose_residual_6d"],
+        torch.zeros_like(outputs["stage2r_pose_residual_6d"]),
+    )
 
 
 def test_stage3_temporal_refine_model_forward_shapes() -> None:
@@ -208,6 +242,39 @@ def test_stage3_loss_includes_residual_regularization_when_configured() -> None:
     assert torch.isclose(losses["loss"], torch.tensor(0.6875))
 
 
+def test_stage2_loss_includes_rgb_residual_regularization_when_configured() -> None:
+    criterion = Stage2Loss(
+        Stage2LossConfig(
+            pose_6d_weight=0.0,
+            betas_weight=0.0,
+            init_pose_6d_weight=0.0,
+            init_betas_weight=0.0,
+            pose_residual_weight=2.0,
+            betas_residual_weight=3.0,
+            supervise_betas=True,
+        )
+    )
+    pred_pose_6d = torch.zeros(1, 23, 6)
+    pred_betas = torch.zeros(1, 10)
+    pose_residual_6d = torch.full((1, 23, 6), 0.5)
+    betas_residual = torch.full((1, 10), 0.25)
+
+    losses = criterion(
+        pred_pose_6d=pred_pose_6d,
+        pred_betas=pred_betas,
+        target_pose_6d=pred_pose_6d,
+        target_betas=pred_betas,
+        init_pose_6d=pred_pose_6d,
+        init_betas=pred_betas,
+        pose_residual_6d=pose_residual_6d,
+        betas_residual=betas_residual,
+    )
+
+    assert torch.isclose(losses["loss_pose_residual"], torch.tensor(0.25))
+    assert torch.isclose(losses["loss_betas_residual"], torch.tensor(0.0625))
+    assert torch.isclose(losses["loss"], torch.tensor(0.6875))
+
+
 class _EchoStage2Backbone(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -215,15 +282,89 @@ class _EchoStage2Backbone(nn.Module):
 
     def forward(self, views_input: torch.Tensor) -> dict[str, torch.Tensor]:
         batch_size = views_input.shape[0]
+        num_views = views_input.shape[1]
         pooled_input = views_input.mean(dim=1)
         init_pose_6d = pooled_input[:, :138].reshape(batch_size, 23, 6)
         pred_pose_6d = init_pose_6d + self.pose_offset
         pred_betas = pooled_input[:, 138:]
+        view_weights = torch.full(
+            (batch_size, num_views),
+            1.0 / float(num_views),
+            dtype=views_input.dtype,
+            device=views_input.device,
+        )
         return {
             "init_pose_6d": init_pose_6d,
+            "init_betas": pred_betas,
             "pred_pose_6d": pred_pose_6d,
             "pred_betas": pred_betas,
+            "view_weights": view_weights,
+            "pose_view_weights": view_weights.unsqueeze(-1).expand(
+                batch_size,
+                num_views,
+                23,
+            ),
         }
+
+
+def test_stage2r_rgb_guided_residual_refiner_lightning_uses_frozen_stage2_backbone() -> None:
+    config = Stage2RRGBGuidedResidualRefinerConfig(
+        hidden_dim=32,
+        latent_dim=16,
+        encoder_layers=1,
+        residual_layers=2,
+        dropout=0.0,
+        rgb_projection_dim=8,
+        rgb_hidden_dim=8,
+        rgb_layers=1,
+    )
+    module = Stage2RRGBGuidedResidualRefinerLightningModule(
+        model_config=config,
+        stage2_backbone_model=_EchoStage2Backbone(),
+    )
+    views_input = torch.randn(2, 3, config.input_dim)
+    view_rgb_feature = torch.randn(2, 3, config.rgb_feature_dim)
+
+    outputs = module(views_input, view_rgb_feature=view_rgb_feature)
+
+    assert not any(
+        parameter.requires_grad for parameter in module.stage2_backbone.parameters()
+    )
+    with torch.no_grad():
+        stage2_outputs = module.stage2_backbone(views_input)
+    assert torch.equal(outputs["pred_pose_6d"], stage2_outputs["pred_pose_6d"])
+    assert torch.equal(outputs["pred_betas"], stage2_outputs["pred_betas"])
+
+
+def test_stage2r_rgb_guided_residual_refiner_joint_training_uses_backbone_lr_scale() -> None:
+    config = Stage2RRGBGuidedResidualRefinerConfig(
+        hidden_dim=32,
+        latent_dim=16,
+        encoder_layers=1,
+        residual_layers=2,
+        dropout=0.0,
+        rgb_projection_dim=8,
+        rgb_hidden_dim=8,
+        rgb_layers=1,
+        freeze_backbone=False,
+        detach_backbone_outputs=False,
+    )
+    module = Stage2RRGBGuidedResidualRefinerLightningModule(
+        model_config=config,
+        optimization_config=Stage2OptimizationConfig(
+            learning_rate=1e-3,
+            weight_decay=0.0,
+            stage2_backbone_lr_scale=0.2,
+        ),
+        stage2_backbone_model=_EchoStage2Backbone(),
+    )
+
+    optimizer = module.configure_optimizers()
+
+    assert any(parameter.requires_grad for parameter in module.stage2_backbone.parameters())
+    assert len(optimizer.param_groups) == 2
+    assert optimizer.param_groups[0]["lr"] == 1e-3
+    assert optimizer.param_groups[1]["lr"] == 2e-4
 
 
 def test_stage3_lightning_module_zero_init_matches_frozen_stage2_center_prediction() -> None:
@@ -469,6 +610,63 @@ def test_stage2_lightning_module_test_step_uses_camera_metrics(
     assert "test/pa_mpjpe" in metrics
 
 
+def test_stage2r_rgb_guided_residual_refiner_joint_training_logs_stage2_aux_loss(
+    sample_manifest: Path,
+    sample_input_smpl_cache: Path,
+    sample_rgb_feature_cache: Path,
+) -> None:
+    datamodule = Stage2HuMManDataModule(
+        Stage2DataConfig(
+            manifest_path=str(sample_manifest),
+            input_smpl_cache_dir=str(sample_input_smpl_cache),
+            rgb_feature_cache_dir=str(sample_rgb_feature_cache),
+            num_views=2,
+            batch_size=1,
+            drop_last_train=False,
+        )
+    )
+    datamodule.setup("fit")
+    batch = next(iter(datamodule.train_dataloader()))
+
+    config = Stage2RRGBGuidedResidualRefinerConfig(
+        hidden_dim=32,
+        latent_dim=16,
+        encoder_layers=1,
+        residual_layers=2,
+        dropout=0.0,
+        rgb_projection_dim=8,
+        rgb_hidden_dim=8,
+        rgb_layers=1,
+        freeze_backbone=False,
+        detach_backbone_outputs=False,
+    )
+    module = Stage2RRGBGuidedResidualRefinerLightningModule(
+        model_config=config,
+        loss_config=Stage2LossConfig(
+            pose_6d_weight=1.0,
+            betas_weight=0.0,
+            joint_weight=0.0,
+            articulation_weight=0.0,
+            init_pose_6d_weight=0.0,
+            init_betas_weight=0.0,
+            pose_residual_weight=0.0,
+            stage2_aux_weight=2.0,
+        ),
+        stage2_backbone_model=_EchoStage2Backbone(),
+    )
+    dummy_joints = torch.zeros(1, 24, 3)
+    module._runtime_cache["smpl_eval_model"] = lambda **_: None
+    module._build_smpl_joints = lambda **_: dummy_joints
+
+    metrics = module._shared_step(batch, stage="train")
+
+    assert metrics["train/loss_stage2_aux"] > 0.0
+    assert torch.isclose(
+        metrics["train/loss"],
+        metrics["train/loss_pose_6d"] + metrics["train/loss_stage2_aux"] * 2.0,
+    )
+
+
 
 
 def test_stage3_lightning_module_training_step(
@@ -649,6 +847,36 @@ def test_load_stage2_joint_graph_refiner_experiment_config_resolves_sections() -
     assert experiment["model"]["name"] == "stage2_joint_graph_refiner"
 
 
+def test_load_stage2r_rgb_guided_residual_refiner_experiment_config_resolves_sections() -> None:
+    experiment = load_experiment_config(
+        "configs/experiment/stage2r_rgb_guided_residual_refiner.yaml"
+    )
+
+    assert (
+        experiment["experiment_name"]
+        == "stage2r_rgb_guided_residual_refiner"
+    )
+    assert experiment["data"]["name"] == "humman_stage2"
+    assert experiment["model"]["name"] == "stage2r_rgb_guided_residual_refiner"
+    assert experiment["model"]["freeze_backbone"] is True
+
+
+def test_load_stage2r_rgb_guided_residual_refiner_joint_train_config_resolves_sections() -> None:
+    experiment = load_experiment_config(
+        "configs/experiment/stage2r_rgb_guided_residual_refiner_joint_train.yaml"
+    )
+
+    assert (
+        experiment["experiment_name"]
+        == "stage2r_rgb_guided_residual_refiner_joint_train"
+    )
+    assert experiment["data"]["name"] == "humman_stage2"
+    assert experiment["model"]["name"] == "stage2r_rgb_guided_residual_refiner"
+    assert experiment["model"]["freeze_backbone"] is False
+    assert experiment["loss"]["stage2_aux_weight"] == 0.25
+    assert experiment["optimizer"]["stage2_backbone_lr_scale"] == 0.2
+
+
 def test_load_stage3_experiment_config_resolves_sections() -> None:
     experiment = load_experiment_config("configs/experiment/stage3_temporal_refine.yaml")
 
@@ -675,7 +903,7 @@ def test_load_stage3_joint_train_experiment_config_resolves_sections() -> None:
     assert experiment["model"]["name"] == "stage3_temporal_refine"
     assert experiment["model"]["freeze_backbone"] is False
     assert experiment["loss"]["stage2_aux_weight"] == 0.25
-    assert experiment["optimizer"]["stage2_backbone_lr_scale"] == 0.1
+    assert experiment["optimizer"]["stage2_backbone_lr_scale"] == 0.2
 
 
 def test_load_stage3_e2e_scratch_experiment_config_resolves_sections() -> None:

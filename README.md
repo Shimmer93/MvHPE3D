@@ -63,6 +63,11 @@ reproducible repository state rather than an untracked local script.
 - cached fitted SMPL `betas`
 - internally converted to canonical `body_pose_6d + betas` for fusion/refinement
 
+**Stage 2R model input per view**:
+- the same cached fitted SMPL representation as Stage 2
+- a frozen RGB feature vector from `scripts/precompute_rgb_features.py`
+- a Stage 2 checkpoint used as the backbone prediction source
+
 **Available auxiliary per-view fields**:
 - `pred_cam_t`
 - `cam_int`
@@ -177,6 +182,23 @@ Stage 2 still requires the manifest because it defines sample grouping, split
 resolution, per-view source `.npz` paths, and default GT/camera lookup roots.
 The fitted-SMPL cache replaces the Stage 1 compact per-view model input, not
 the manifest itself.
+
+Stage 2R is the RGB-guided residual refiner on top of Stage 2. It is still a
+per-frame model, not a post-Stage-3 stage. First precompute frozen RGB features:
+
+```bash
+uv run python scripts/precompute_rgb_features.py --manifest-path /path/to/humman_stage1_manifest.json --rgb-dir /path/to/humman_cropped/rgb --output-dir /path/to/rgb_features
+```
+
+Then train the joint-training Stage 2R variant with:
+
+```bash
+uv run python scripts/train.py --config configs/experiment/stage2r_rgb_guided_residual_refiner_joint_train.yaml --manifest-path /path/to/humman_stage1_manifest.json --input-smpl-cache-dir /path/to/sam3dbody_fitted_smpl --rgb-feature-cache-dir /path/to/rgb_features --stage2-checkpoint-path /path/to/stage2.ckpt
+```
+
+The frozen adapter variant is available at
+`configs/experiment/stage2r_rgb_guided_residual_refiner.yaml`. More detail is in
+[docs/stage2r_rgb_guided_residual_refiner.md](/home/zpengac/mmhpe/MvHPE3D/docs/stage2r_rgb_guided_residual_refiner.md:1).
 
 Important:
 - exported SAM3DBody `.npz` files must include `mhr_model_params` and `shape_params`

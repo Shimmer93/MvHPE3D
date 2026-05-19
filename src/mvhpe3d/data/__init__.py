@@ -10,6 +10,7 @@ from .datamodule import (
     Stage3DataConfig,
     Stage3HuMManDataModule,
 )
+from .rgb_features import load_rgb_feature_payload, resolve_rgb_feature_cache_path
 
 __all__ = [
     "Stage1DataConfig",
@@ -20,5 +21,7 @@ __all__ = [
     "Stage3HuMManDataModule",
     "canonicalize_stage1_target",
     "canonicalize_stage2_target",
+    "load_rgb_feature_payload",
     "multiview_collate",
+    "resolve_rgb_feature_cache_path",
 ]

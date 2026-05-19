@@ -26,6 +26,7 @@ from mvhpe3d.lightning import (
     Stage1OptimizationConfig,
     Stage2FusionLightningModule,
     Stage2OptimizationConfig,
+    Stage2RRGBGuidedResidualRefinerLightningModule,
     Stage3OptimizationConfig,
     Stage3TemporalLightningModule,
 )
@@ -36,6 +37,7 @@ from mvhpe3d.models import (
     Stage2JointGraphRefinerConfig,
     Stage2JointResidualConfig,
     Stage2ParamRefineConfig,
+    Stage2RRGBGuidedResidualRefinerConfig,
     Stage3TemporalRefineConfig,
     Stage3ViewTimeTokenConfig,
 )
@@ -141,10 +143,16 @@ def parse_args() -> argparse.Namespace:
         help="Optional directory for caching fitted SMPL parameters converted from input views",
     )
     parser.add_argument(
+        "--rgb-feature-cache-dir",
+        type=str,
+        default=None,
+        help="Optional Stage 2 RGB feature cache directory from scripts/precompute_rgb_features.py",
+    )
+    parser.add_argument(
         "--stage2-checkpoint-path",
         type=str,
         default=None,
-        help="Optional Stage 2 checkpoint used to initialize the Stage 3 backbone",
+        help="Optional Stage 2 checkpoint used by Stage 3 or RGB residual refinement",
     )
     parser.add_argument(
         "--test-after-train",
@@ -229,6 +237,9 @@ def build_data_config(
         input_smpl_cache_dir = getattr(args, "input_smpl_cache_dir", None)
         if input_smpl_cache_dir is not None:
             data_kwargs["input_smpl_cache_dir"] = input_smpl_cache_dir
+    rgb_feature_cache_dir = getattr(args, "rgb_feature_cache_dir", None)
+    if data_name == "humman_stage2" and rgb_feature_cache_dir is not None:
+        data_kwargs["rgb_feature_cache_dir"] = rgb_feature_cache_dir
     if data_name == "humman_stage3":
         return Stage3DataConfig(**data_kwargs)
     if data_name == "humman_stage2":
@@ -246,6 +257,7 @@ def build_model_config(
     | Stage2JointGraphRefinerConfig
     | Stage2JointResidualConfig
     | Stage2ParamRefineConfig
+    | Stage2RRGBGuidedResidualRefinerConfig
     | Stage3TemporalRefineConfig
     | Stage3ViewTimeTokenConfig
 ):
@@ -256,6 +268,10 @@ def build_model_config(
         if args.disable_learn_betas:
             model_kwargs["learn_betas"] = False
         return Stage2JointGraphRefinerConfig(**model_kwargs)
+    if model_name == "stage2r_rgb_guided_residual_refiner":
+        if args.disable_learn_betas:
+            model_kwargs["learn_betas"] = False
+        return Stage2RRGBGuidedResidualRefinerConfig(**model_kwargs)
     if model_name == "stage3_temporal_refine":
         if args.disable_learn_betas:
             model_kwargs["learn_betas"] = False
@@ -289,6 +305,7 @@ def build_loss_config(
         | Stage2JointGraphRefinerConfig
         | Stage2JointResidualConfig
         | Stage2ParamRefineConfig
+        | Stage2RRGBGuidedResidualRefinerConfig
         | Stage3TemporalRefineConfig
         | Stage3ViewTimeTokenConfig
     ),
@@ -300,6 +317,7 @@ def build_loss_config(
             Stage2ParamRefineConfig,
             Stage2JointResidualConfig,
             Stage2JointGraphRefinerConfig,
+            Stage2RRGBGuidedResidualRefinerConfig,
         ),
     ):
         if args.disable_learn_betas:
@@ -327,6 +345,7 @@ def build_optimization_config(
         | Stage2JointGraphRefinerConfig
         | Stage2JointResidualConfig
         | Stage2ParamRefineConfig
+        | Stage2RRGBGuidedResidualRefinerConfig
         | Stage3TemporalRefineConfig
         | Stage3ViewTimeTokenConfig
     ),
@@ -339,6 +358,7 @@ def build_optimization_config(
             Stage2ParamRefineConfig,
             Stage2JointResidualConfig,
             Stage2JointGraphRefinerConfig,
+            Stage2RRGBGuidedResidualRefinerConfig,
         ),
     ):
         return Stage2OptimizationConfig(**config)
@@ -522,6 +542,14 @@ def build_lightning_module(
     data_config: Stage1DataConfig | Stage2DataConfig | Stage3DataConfig,
     args: argparse.Namespace,
 ):
+    if isinstance(model_config, Stage2RRGBGuidedResidualRefinerConfig):
+        return Stage2RRGBGuidedResidualRefinerLightningModule(
+            model_config=model_config,
+            loss_config=loss_config,
+            optimization_config=optimization_config,
+            smpl_model_path=args.smpl_model_path,
+            stage2_checkpoint_path=args.stage2_checkpoint_path,
+        )
     if isinstance(model_config, (Stage3TemporalRefineConfig, Stage3ViewTimeTokenConfig)):
         return Stage3TemporalLightningModule(
             model_config=model_config,
@@ -561,6 +589,7 @@ def is_stage2_or_stage3_experiment(experiment: dict[str, Any]) -> bool:
         "stage2_param_refine",
         "stage2_joint_residual",
         "stage2_joint_graph_refiner",
+        "stage2r_rgb_guided_residual_refiner",
         "stage3_temporal_refine",
         "stage3_view_time_token",
     } or data_name in {"humman_stage2", "humman_stage3"}

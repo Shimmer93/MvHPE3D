@@ -187,6 +187,7 @@ class Stage2DataConfig:
     gt_smpl_dir: str | None = None
     cameras_dir: str | None = None
     input_smpl_cache_dir: str | None = None
+    rgb_feature_cache_dir: str | None = None
     split_config_path: str | None = None
     split_name: str | None = None
     num_views: int = 2
@@ -254,6 +255,12 @@ class Stage2HuMManDataModule(L.LightningDataModule):
                 "Input SMPL cache directory does not exist: "
                 f"{input_smpl_cache_dir}. Run scripts/precompute_input_smpl.py first."
             )
+        rgb_feature_cache_dir = self._resolve_rgb_feature_cache_dir()
+        if rgb_feature_cache_dir is not None and not rgb_feature_cache_dir.exists():
+            raise FileNotFoundError(
+                "RGB feature cache directory does not exist: "
+                f"{rgb_feature_cache_dir}. Run scripts/precompute_rgb_features.py first."
+            )
         if self.config.split_config_path is not None:
             split_config_path = Path(self.config.split_config_path)
             if not split_config_path.exists():
@@ -265,6 +272,7 @@ class Stage2HuMManDataModule(L.LightningDataModule):
         gt_smpl_dir = self._resolve_gt_smpl_dir()
         cameras_dir = self._resolve_cameras_dir()
         input_smpl_cache_dir = self._resolve_input_smpl_cache_dir()
+        rgb_feature_cache_dir = self._resolve_rgb_feature_cache_dir()
 
         if stage in (None, "fit"):
             self.train_dataset = HuMManStage2Dataset(
@@ -274,6 +282,7 @@ class Stage2HuMManDataModule(L.LightningDataModule):
                 gt_smpl_dir=gt_smpl_dir,
                 cameras_dir=cameras_dir,
                 input_smpl_cache_dir=input_smpl_cache_dir,
+                rgb_feature_cache_dir=rgb_feature_cache_dir,
                 seed=self.config.seed,
             )
             self.val_dataset = HuMManStage2Dataset(
@@ -283,6 +292,7 @@ class Stage2HuMManDataModule(L.LightningDataModule):
                 gt_smpl_dir=gt_smpl_dir,
                 cameras_dir=cameras_dir,
                 input_smpl_cache_dir=input_smpl_cache_dir,
+                rgb_feature_cache_dir=rgb_feature_cache_dir,
                 seed=self.config.seed,
             )
 
@@ -294,6 +304,7 @@ class Stage2HuMManDataModule(L.LightningDataModule):
                 gt_smpl_dir=gt_smpl_dir,
                 cameras_dir=cameras_dir,
                 input_smpl_cache_dir=input_smpl_cache_dir,
+                rgb_feature_cache_dir=rgb_feature_cache_dir,
                 seed=self.config.seed,
             )
 
@@ -305,6 +316,7 @@ class Stage2HuMManDataModule(L.LightningDataModule):
                 gt_smpl_dir=gt_smpl_dir,
                 cameras_dir=cameras_dir,
                 input_smpl_cache_dir=input_smpl_cache_dir,
+                rgb_feature_cache_dir=rgb_feature_cache_dir,
                 seed=self.config.seed,
             )
 
@@ -384,6 +396,11 @@ class Stage2HuMManDataModule(L.LightningDataModule):
 
         manifest_path = Path(self.config.manifest_path).resolve()
         return (manifest_path.parent / "sam3dbody_fitted_smpl").resolve()
+
+    def _resolve_rgb_feature_cache_dir(self) -> Path | None:
+        if self.config.rgb_feature_cache_dir is None:
+            return None
+        return Path(self.config.rgb_feature_cache_dir).resolve()
 
 
 class Stage3HuMManDataModule(L.LightningDataModule):

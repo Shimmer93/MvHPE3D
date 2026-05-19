@@ -60,6 +60,9 @@ class Stage2LossConfig:
     articulation_weight: float = 0.0
     init_pose_6d_weight: float = 0.25
     init_betas_weight: float = 0.025
+    pose_residual_weight: float = 0.0
+    betas_residual_weight: float = 0.0
+    stage2_aux_weight: float = 0.0
     supervise_betas: bool = True
 
 
@@ -79,6 +82,8 @@ class Stage2Loss(nn.Module):
         target_betas: torch.Tensor,
         init_pose_6d: torch.Tensor,
         init_betas: torch.Tensor,
+        pose_residual_6d: torch.Tensor | None = None,
+        betas_residual: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         pose_6d_loss = F.mse_loss(pred_pose_6d, target_pose_6d)
         if self.config.supervise_betas:
@@ -88,12 +93,22 @@ class Stage2Loss(nn.Module):
             betas_loss = pose_6d_loss.new_zeros(())
             init_betas_loss = pose_6d_loss.new_zeros(())
         init_pose_6d_loss = F.mse_loss(init_pose_6d, target_pose_6d)
+        if pose_residual_6d is not None and self.config.pose_residual_weight > 0:
+            pose_residual_loss = pose_residual_6d.square().mean()
+        else:
+            pose_residual_loss = pose_6d_loss.new_zeros(())
+        if betas_residual is not None and self.config.betas_residual_weight > 0:
+            betas_residual_loss = betas_residual.square().mean()
+        else:
+            betas_residual_loss = pose_6d_loss.new_zeros(())
 
         total_loss = (
             self.config.pose_6d_weight * pose_6d_loss
             + self.config.betas_weight * betas_loss
             + self.config.init_pose_6d_weight * init_pose_6d_loss
             + self.config.init_betas_weight * init_betas_loss
+            + self.config.pose_residual_weight * pose_residual_loss
+            + self.config.betas_residual_weight * betas_residual_loss
         )
         return {
             "loss": total_loss,
@@ -101,6 +116,8 @@ class Stage2Loss(nn.Module):
             "loss_betas": betas_loss,
             "loss_init_pose_6d": init_pose_6d_loss,
             "loss_init_betas": init_betas_loss,
+            "loss_pose_residual": pose_residual_loss,
+            "loss_betas_residual": betas_residual_loss,
         }
 
 

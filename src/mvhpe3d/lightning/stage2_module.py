@@ -24,6 +24,8 @@ from mvhpe3d.models import (
     Stage2JointResidualModel,
     Stage2ParamRefineConfig,
     Stage2ParamRefineModel,
+    Stage2RRGBGuidedResidualRefinerConfig,
+    Stage2RRGBGuidedResidualRefinerModel,
 )
 from mvhpe3d.utils import build_smpl_model
 
@@ -34,6 +36,7 @@ class Stage2OptimizationConfig:
 
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
+    stage2_backbone_lr_scale: float = 0.1
 
 
 class Stage2FusionLightningModule(L.LightningModule):
@@ -83,7 +86,14 @@ class Stage2FusionLightningModule(L.LightningModule):
             }
         )
 
-    def forward(self, views_input: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(
+        self,
+        views_input: torch.Tensor,
+        *,
+        view_rgb_feature: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        if view_rgb_feature is not None:
+            self._assert_finite_tensor("batch/view_rgb_feature", view_rgb_feature)
         return self.model(views_input)
 
     def training_step(self, batch, batch_idx):
@@ -123,7 +133,10 @@ class Stage2FusionLightningModule(L.LightningModule):
         return metrics["test/loss"]
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
-        predictions = self(batch["views_input"])
+        predictions = self(
+            batch["views_input"],
+            view_rgb_feature=batch.get("view_rgb_feature"),
+        )
         return {
             "pred_body_pose": predictions["pred_body_pose"],
             "pred_betas": predictions["pred_betas"],
@@ -139,10 +152,15 @@ class Stage2FusionLightningModule(L.LightningModule):
 
     def _shared_step(self, batch, *, stage: str) -> dict[str, torch.Tensor]:
         self._assert_finite_tensor("batch/views_input", batch["views_input"])
-        self._assert_finite_tensor("batch/target_body_pose_6d", batch["target_body_pose_6d"])
+        self._assert_finite_tensor(
+            "batch/target_body_pose_6d", batch["target_body_pose_6d"]
+        )
         self._assert_finite_tensor("batch/target_betas", batch["target_betas"])
         self._assert_finite_tensor("batch/target_body_pose", batch["target_body_pose"])
-        predictions = self(batch["views_input"])
+        predictions = self(
+            batch["views_input"],
+            view_rgb_feature=batch.get("view_rgb_feature"),
+        )
         for name, value in predictions.items():
             if torch.is_tensor(value):
                 self._assert_finite_tensor(f"predictions/{name}", value)
@@ -153,6 +171,7 @@ class Stage2FusionLightningModule(L.LightningModule):
             target_betas=batch["target_betas"],
             init_pose_6d=predictions["init_pose_6d"],
             init_betas=predictions["init_betas"],
+            pose_residual_6d=predictions.get("stage2r_pose_residual_6d"),
         )
         for name, value in losses.items():
             self._assert_finite_tensor(f"losses/{name}", value)
@@ -164,12 +183,21 @@ class Stage2FusionLightningModule(L.LightningModule):
         )
         joint_loss = F.mse_loss(pred_joints, target_joints)
         self._assert_finite_tensor("losses/joint_loss", joint_loss)
-        articulation_loss = self._compute_articulation_loss(pred_joints=pred_joints, target_joints=target_joints)
+        articulation_loss = self._compute_articulation_loss(
+            pred_joints=pred_joints, target_joints=target_joints
+        )
         self._assert_finite_tensor("losses/articulation_loss", articulation_loss)
+        stage2_aux_losses = self._compute_stage2_aux_losses(
+            predictions=predictions,
+            batch=batch,
+        )
+        for name, value in stage2_aux_losses.items():
+            self._assert_finite_tensor(f"losses/{name}", value)
         total_loss = (
             losses["loss"]
             + self.loss_config.joint_weight * joint_loss
             + self.loss_config.articulation_weight * articulation_loss
+            + self.loss_config.stage2_aux_weight * stage2_aux_losses["stage2_aux_loss"]
         )
         self._assert_finite_tensor("losses/total_loss", total_loss)
         metrics = {
@@ -178,9 +206,25 @@ class Stage2FusionLightningModule(L.LightningModule):
             f"{stage}/loss_betas": losses["loss_betas"],
             f"{stage}/loss_init_pose_6d": losses["loss_init_pose_6d"],
             f"{stage}/loss_init_betas": losses["loss_init_betas"],
+            f"{stage}/loss_pose_residual": losses["loss_pose_residual"],
+            f"{stage}/loss_betas_residual": losses["loss_betas_residual"],
             f"{stage}/loss_joints": joint_loss,
             f"{stage}/loss_articulation": articulation_loss,
+            f"{stage}/loss_stage2_aux": stage2_aux_losses["stage2_aux_loss"],
+            f"{stage}/loss_stage2_aux_pose_6d": stage2_aux_losses[
+                "stage2_aux_pose_6d"
+            ],
+            f"{stage}/loss_stage2_aux_betas": stage2_aux_losses[
+                "stage2_aux_betas"
+            ],
         }
+        metrics.update(
+            self._compute_rgb_residual_diagnostics(
+                predictions=predictions,
+                batch=batch,
+                stage=stage,
+            )
+        )
 
         if stage == "val":
             joint_metrics = self._compute_canonical_joint_metrics(
@@ -209,6 +253,50 @@ class Stage2FusionLightningModule(L.LightningModule):
                     "test/mpjpe": joint_metrics["mpjpe"],
                     "test/pa_mpjpe": joint_metrics["pa_mpjpe"],
                 }
+            )
+        return metrics
+
+    def _compute_stage2_aux_losses(
+        self,
+        *,
+        predictions: dict[str, torch.Tensor],
+        batch: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        zero = predictions["pred_pose_6d"].new_zeros(())
+        return {
+            "stage2_aux_loss": zero,
+            "stage2_aux_pose_6d": zero,
+            "stage2_aux_betas": zero,
+        }
+
+    def _compute_rgb_residual_diagnostics(
+        self,
+        *,
+        predictions: dict[str, torch.Tensor],
+        batch: dict,
+        stage: str,
+    ) -> dict[str, torch.Tensor]:
+        metrics: dict[str, torch.Tensor] = {}
+        view_rgb_feature = batch.get("view_rgb_feature")
+        if view_rgb_feature is not None:
+            rgb_feature = view_rgb_feature.to(
+                device=batch["views_input"].device,
+                dtype=batch["views_input"].dtype,
+            )
+            rgb_norm = torch.linalg.vector_norm(rgb_feature, dim=-1)
+            metrics.update(
+                {
+                    f"{stage}/rgb_feature_norm_mean": rgb_norm.mean(),
+                    f"{stage}/rgb_feature_norm_std": rgb_norm.std(unbiased=False),
+                }
+            )
+        stage2r_pose_residual = predictions.get("stage2r_pose_residual_6d")
+        if stage2r_pose_residual is not None:
+            metrics[f"{stage}/stage2r_pose_residual_abs_mean"] = (
+                stage2r_pose_residual.detach().abs().mean()
+            )
+            metrics[f"{stage}/stage2r_pose_residual_abs_max"] = (
+                stage2r_pose_residual.detach().abs().amax()
             )
         return metrics
 
@@ -320,7 +408,9 @@ class Stage2FusionLightningModule(L.LightningModule):
             target_betas=target_betas,
             input_views_pose_6d=input_pose_6d,
             input_views_betas=input_betas,
-            input_camera_global_orient=view_aux["input_global_orient"].to(pred_body_pose.device),
+            input_camera_global_orient=view_aux["input_global_orient"].to(
+                pred_body_pose.device
+            ),
             input_transl=view_aux["input_transl"].to(pred_body_pose.device),
         )
 
@@ -332,7 +422,9 @@ class Stage2FusionLightningModule(L.LightningModule):
         global_orient: torch.Tensor,
         transl: torch.Tensor,
     ) -> torch.Tensor:
-        smpl_model = self._get_smpl_eval_model(device=body_pose.device, batch_size=body_pose.shape[0])
+        smpl_model = self._get_smpl_eval_model(
+            device=body_pose.device, batch_size=body_pose.shape[0]
+        )
         with torch.autocast(device_type=body_pose.device.type, enabled=False):
             output = smpl_model(
                 body_pose=body_pose.float(),
@@ -395,13 +487,196 @@ class Stage2FusionLightningModule(L.LightningModule):
         detached = tensor.detach()
         nonfinite_mask = ~torch.isfinite(detached)
         bad_count = int(nonfinite_mask.sum().item())
-        min_value = float(detached[torch.isfinite(detached)].min().item()) if torch.isfinite(detached).any() else float("nan")
-        max_value = float(detached[torch.isfinite(detached)].max().item()) if torch.isfinite(detached).any() else float("nan")
+        min_value = (
+            float(detached[torch.isfinite(detached)].min().item())
+            if torch.isfinite(detached).any()
+            else float("nan")
+        )
+        max_value = (
+            float(detached[torch.isfinite(detached)].max().item())
+            if torch.isfinite(detached).any()
+            else float("nan")
+        )
         raise RuntimeError(
             f"Non-finite tensor detected at {name}: "
             f"shape={tuple(detached.shape)}, bad_count={bad_count}, "
             f"finite_min={min_value}, finite_max={max_value}"
         )
+
+
+class Stage2RRGBGuidedResidualRefinerLightningModule(Stage2FusionLightningModule):
+    """Train a small RGB residual adapter on top of a Stage 2 checkpoint."""
+
+    def __init__(
+        self,
+        *,
+        model_config: Stage2RRGBGuidedResidualRefinerConfig | dict | None = None,
+        loss_config: Stage2LossConfig | dict | None = None,
+        optimization_config: Stage2OptimizationConfig | dict | None = None,
+        smpl_model_path: str | None = None,
+        stage2_checkpoint_path: str | None = None,
+        stage2_backbone_model: torch.nn.Module | None = None,
+    ) -> None:
+        L.LightningModule.__init__(self)
+        self.model_config = _coerce_rgb_residual_model_config(model_config)
+        self.loss_config = _coerce_dataclass_config(loss_config, Stage2LossConfig)
+        if not self.model_config.learn_betas:
+            self.loss_config.supervise_betas = False
+            self.loss_config.betas_weight = 0.0
+            self.loss_config.init_betas_weight = 0.0
+        self.optimization_config = _coerce_dataclass_config(
+            optimization_config,
+            Stage2OptimizationConfig,
+        )
+        self.smpl_model_path = smpl_model_path
+        self.stage2_checkpoint_path = stage2_checkpoint_path
+
+        self.stage2_backbone = self._load_stage2_backbone(
+            stage2_checkpoint_path=stage2_checkpoint_path,
+            stage2_backbone_model=stage2_backbone_model,
+        )
+        self.model = Stage2RRGBGuidedResidualRefinerModel(self.model_config)
+        self.criterion = Stage2Loss(self.loss_config)
+        self._runtime_cache: dict[str, object | None] = {
+            "smpl_eval_model": None,
+        }
+
+        self.save_hyperparameters(
+            {
+                "model_config": asdict(self.model_config),
+                "loss_config": asdict(self.loss_config),
+                "optimization_config": asdict(self.optimization_config),
+                "smpl_model_path": self.smpl_model_path,
+                "stage2_checkpoint_path": self.stage2_checkpoint_path,
+            }
+        )
+
+    def forward(
+        self,
+        views_input: torch.Tensor,
+        *,
+        view_rgb_feature: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        if view_rgb_feature is None:
+            raise ValueError(
+                "Stage2RRGBGuidedResidualRefinerLightningModule requires view_rgb_feature."
+            )
+        self._assert_finite_tensor("batch/view_rgb_feature", view_rgb_feature)
+        stage2_outputs = self._run_stage2_backbone(
+            views_input,
+        )
+        return self.model(
+            views_input,
+            view_rgb_feature=view_rgb_feature,
+            stage2_outputs=stage2_outputs,
+        )
+
+    def configure_optimizers(self):
+        adapter_parameters = [
+            parameter for parameter in self.model.parameters() if parameter.requires_grad
+        ]
+        parameter_groups: list[dict[str, object]] = [
+            {
+                "params": adapter_parameters,
+                "lr": self.optimization_config.learning_rate,
+            }
+        ]
+        stage2_parameters = [
+            parameter
+            for parameter in self.stage2_backbone.parameters()
+            if parameter.requires_grad
+        ]
+        if stage2_parameters:
+            parameter_groups.append(
+                {
+                    "params": stage2_parameters,
+                    "lr": (
+                        self.optimization_config.learning_rate
+                        * self.optimization_config.stage2_backbone_lr_scale
+                    ),
+                }
+            )
+        return torch.optim.AdamW(
+            parameter_groups,
+            weight_decay=self.optimization_config.weight_decay,
+        )
+
+    def _compute_stage2_aux_losses(
+        self,
+        *,
+        predictions: dict[str, torch.Tensor],
+        batch: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        if self.loss_config.stage2_aux_weight <= 0.0 or not any(
+            parameter.requires_grad for parameter in self.stage2_backbone.parameters()
+        ):
+            zero = predictions["pred_pose_6d"].new_zeros(())
+            return {
+                "stage2_aux_loss": zero,
+                "stage2_aux_pose_6d": zero,
+                "stage2_aux_betas": zero,
+            }
+
+        stage2_pose = predictions["stage2_pred_pose_6d"]
+        stage2_betas = predictions["stage2_pred_betas"]
+        target_pose = batch["target_body_pose_6d"].to(
+            device=stage2_pose.device,
+            dtype=stage2_pose.dtype,
+        )
+        target_betas = batch["target_betas"].to(
+            device=stage2_betas.device,
+            dtype=stage2_betas.dtype,
+        )
+        pose_loss = F.mse_loss(stage2_pose, target_pose)
+        if self.loss_config.supervise_betas:
+            betas_loss = F.mse_loss(stage2_betas, target_betas)
+        else:
+            betas_loss = pose_loss.new_zeros(())
+        aux_loss = (
+            self.loss_config.pose_6d_weight * pose_loss
+            + self.loss_config.betas_weight * betas_loss
+        )
+        return {
+            "stage2_aux_loss": aux_loss,
+            "stage2_aux_pose_6d": pose_loss,
+            "stage2_aux_betas": betas_loss,
+        }
+
+    def _load_stage2_backbone(
+        self,
+        *,
+        stage2_checkpoint_path: str | None,
+        stage2_backbone_model: torch.nn.Module | None,
+    ) -> torch.nn.Module:
+        if stage2_backbone_model is not None:
+            backbone = stage2_backbone_model
+        elif stage2_checkpoint_path is not None:
+            loaded_module = Stage2FusionLightningModule.load_from_checkpoint(
+                stage2_checkpoint_path,
+                map_location="cpu",
+                smpl_model_path=self.smpl_model_path,
+                strict=False,
+            )
+            backbone = loaded_module.model
+        else:
+            raise ValueError(
+                "stage2_checkpoint_path is required for "
+                "stage2r_rgb_guided_residual_refiner."
+            )
+        if self.model_config.freeze_backbone:
+            backbone.requires_grad_(False)
+            backbone.eval()
+        return backbone
+
+    def _run_stage2_backbone(
+        self,
+        views_input: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        if self.model_config.freeze_backbone:
+            self.stage2_backbone.eval()
+            with torch.no_grad():
+                return self.stage2_backbone(views_input)
+        return self.stage2_backbone(views_input)
 
 
 def _coerce_dataclass_config(value, config_type):
@@ -411,7 +686,22 @@ def _coerce_dataclass_config(value, config_type):
         return value
     if isinstance(value, dict):
         return config_type(**value)
-    raise TypeError(f"Expected {config_type.__name__}, dict, or None; got {type(value)!r}")
+    raise TypeError(
+        f"Expected {config_type.__name__}, dict, or None; got {type(value)!r}"
+    )
+
+
+def _coerce_rgb_residual_model_config(value):
+    if value is None:
+        return Stage2RRGBGuidedResidualRefinerConfig()
+    if isinstance(value, Stage2RRGBGuidedResidualRefinerConfig):
+        return value
+    if isinstance(value, dict):
+        return Stage2RRGBGuidedResidualRefinerConfig(**value)
+    raise TypeError(
+        "Expected Stage2RRGBGuidedResidualRefinerConfig, dict, or None; "
+        f"got {type(value)!r}"
+    )
 
 
 def _coerce_stage2_model_config(value):

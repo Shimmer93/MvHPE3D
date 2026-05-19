@@ -13,6 +13,7 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from mvhpe3d.data.rgb_features import resolve_rgb_feature_cache_path
 from mvhpe3d.utils import cache_path_for_source_npz
 
 
@@ -47,6 +48,25 @@ def _write_cached_input_smpl(cache_dir: Path, source_npz_path: Path) -> None:
         "transl": np.zeros(3, dtype=np.float32),
     }
     np.savez(cache_path, **payload)
+
+
+def _write_rgb_feature_cache(
+    cache_dir: Path,
+    *,
+    sequence_id: str,
+    camera_id: str,
+    frame_id: str,
+    feature_dim: int = 384,
+) -> None:
+    cache_path = resolve_rgb_feature_cache_path(
+        cache_dir,
+        sequence_id=sequence_id,
+        camera_id=camera_id,
+        frame_id=frame_id,
+    )
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    feature = np.linspace(0.0, 1.0, feature_dim, dtype=np.float32)
+    np.savez_compressed(cache_path, rgb_feature=feature)
 
 
 def _write_camera_json(path: Path, *, camera_ids: list[str]) -> None:
@@ -103,6 +123,22 @@ def sample_input_smpl_cache(sample_manifest: Path) -> Path:
     cache_dir.mkdir(exist_ok=True)
     for npz_path in sample_manifest.parent.glob("kinect_*.npz"):
         _write_cached_input_smpl(cache_dir, npz_path)
+    return cache_dir
+
+
+@pytest.fixture()
+def sample_rgb_feature_cache(sample_manifest: Path) -> Path:
+    cache_dir = sample_manifest.parent / "rgb_features"
+    cache_dir.mkdir(exist_ok=True)
+    payload = json.loads(sample_manifest.read_text(encoding="utf-8"))
+    for sample in payload["samples"]:
+        for view in sample["views"]:
+            _write_rgb_feature_cache(
+                cache_dir,
+                sequence_id=sample["sequence_id"],
+                camera_id=view["camera_id"],
+                frame_id=sample["frame_id"],
+            )
     return cache_dir
 
 
