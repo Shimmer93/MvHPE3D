@@ -17,7 +17,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from mvhpe3d.data.splits import load_sample_records
-from mvhpe3d.utils import MHRToSMPLConverter
+from mvhpe3d.utils import MHRToSMPLConverter, cache_path_for_source_npz
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,6 +66,23 @@ def parse_args() -> argparse.Namespace:
         default=10,
         help="Print progress every N batches",
     )
+    parser.add_argument(
+        "--num-shards",
+        type=int,
+        default=1,
+        help="Total number of path shards for multi-process precompute",
+    )
+    parser.add_argument(
+        "--shard-index",
+        type=int,
+        default=0,
+        help="Current shard index in [0, num_shards)",
+    )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip source files whose fitted-SMPL cache already exists",
+    )
     return parser.parse_args()
 
 
@@ -77,11 +94,30 @@ def main() -> None:
     os.environ["MVHPE3D_MHR_CONVERTER_DEVICE"] = str(device)
 
     records = load_sample_records(manifest_path)
-    npz_paths = collect_unique_view_npz_paths(records)
+    all_npz_paths = collect_unique_view_npz_paths(records)
+    npz_paths = select_path_shard(
+        all_npz_paths,
+        num_shards=args.num_shards,
+        shard_index=args.shard_index,
+    )
+    if args.skip_existing:
+        before_skip = len(npz_paths)
+        npz_paths = [
+            path
+            for path in npz_paths
+            if not cache_path_for_source_npz(cache_dir, path).exists()
+        ]
+        skipped_existing = before_skip - len(npz_paths)
+    else:
+        skipped_existing = 0
 
     print(f"Manifest: {manifest_path}")
     print(f"Samples: {len(records)}")
-    print(f"Unique view files: {len(npz_paths)}")
+    print(f"Unique view files: {len(all_npz_paths)}")
+    print(
+        f"Shard: {args.shard_index}/{args.num_shards} "
+        f"({len(npz_paths)} files, skipped_existing={skipped_existing})"
+    )
     print(f"Cache dir: {cache_dir}")
     print(f"Device: {device}")
     print(f"Batch size: {args.batch_size}")
@@ -145,6 +181,25 @@ def resolve_device(device_arg: str) -> torch.device:
 def collect_unique_view_npz_paths(records: list) -> list[Path]:
     unique_paths = {view.npz_path.resolve() for record in records for view in record.views}
     return sorted(unique_paths)
+
+
+def select_path_shard(
+    paths: list[Path],
+    *,
+    num_shards: int,
+    shard_index: int,
+) -> list[Path]:
+    if num_shards < 1:
+        raise ValueError(f"num_shards must be >= 1, got {num_shards}")
+    if shard_index < 0 or shard_index >= num_shards:
+        raise ValueError(
+            f"shard_index must be in [0, {num_shards}), got {shard_index}"
+        )
+    return [
+        path
+        for index, path in enumerate(paths)
+        if index % num_shards == shard_index
+    ]
 
 
 def load_compact_view_fields(npz_path: Path) -> dict[str, np.ndarray]:

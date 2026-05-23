@@ -4,3 +4,9 @@
 __pycache__/
 outputs/
 data/
+!configs/data/
+configs/data/*
+!configs/data/mpi_inf_3dhp_stage2.yaml
+!src/mvhpe3d/data/
+src/mvhpe3d/data/*
+!src/mvhpe3d/data/mpi_inf_3dhp.py

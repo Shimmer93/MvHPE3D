@@ -7,7 +7,7 @@ model:
   config: "configs/model/stage2r_rgb_guided_residual_refiner_joint_train.yaml"
 
 loss:
-  pose_6d_weight: 1.0
+  pose_6d_weight: 0.1
   betas_weight: 0.1
   joint_weight: 1.0
   articulation_weight: 0.1

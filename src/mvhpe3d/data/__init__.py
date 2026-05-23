@@ -10,9 +10,23 @@ from .datamodule import (
     Stage3DataConfig,
     Stage3HuMManDataModule,
 )
+from .mpi_inf_3dhp import (
+    MPII3D_HEATFORMER_CAMERA_IDS,
+    MPII3D_HEATFORMER_TRAIN_SAMPLING,
+    MPII3D_HEATFORMER_VAL_SAMPLING,
+    MPII3D_SEQUENCES,
+    MPII3D_TRAIN_SUBJECTS,
+    MPII3D_VAL_SUBJECTS,
+)
 from .rgb_features import load_rgb_feature_payload, resolve_rgb_feature_cache_path
 
 __all__ = [
+    "MPII3D_HEATFORMER_CAMERA_IDS",
+    "MPII3D_HEATFORMER_TRAIN_SAMPLING",
+    "MPII3D_HEATFORMER_VAL_SAMPLING",
+    "MPII3D_SEQUENCES",
+    "MPII3D_TRAIN_SUBJECTS",
+    "MPII3D_VAL_SUBJECTS",
     "Stage1DataConfig",
     "Stage1HuMManDataModule",
     "Stage2DataConfig",

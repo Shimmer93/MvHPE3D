@@ -70,27 +70,81 @@ def matrix_to_axis_angle(rotation_matrix: torch.Tensor) -> torch.Tensor:
         )
     original_dtype = rotation_matrix.dtype
     rotation_matrix = rotation_matrix.float()
+    quaternion = matrix_to_quaternion(rotation_matrix)
+    axis_angle = quaternion_to_axis_angle(quaternion)
+    return axis_angle.to(original_dtype)
 
-    trace = rotation_matrix[..., 0, 0] + rotation_matrix[..., 1, 1] + rotation_matrix[..., 2, 2]
-    cosine = ((trace - 1.0) * 0.5).clamp(min=-1.0, max=1.0)
-    angle = torch.acos(cosine)
 
-    vee = torch.stack(
-        (
-            rotation_matrix[..., 2, 1] - rotation_matrix[..., 1, 2],
-            rotation_matrix[..., 0, 2] - rotation_matrix[..., 2, 0],
-            rotation_matrix[..., 1, 0] - rotation_matrix[..., 0, 1],
-        ),
-        dim=-1,
+def matrix_to_quaternion(rotation_matrix: torch.Tensor) -> torch.Tensor:
+    """Convert rotation matrices ``[..., 3, 3]`` to normalized ``wxyz`` quaternions."""
+    if rotation_matrix.shape[-2:] != (3, 3):
+        raise ValueError(
+            "Expected rotation_matrix trailing shape (3, 3), "
+            f"got {tuple(rotation_matrix.shape)}"
+        )
+    matrix = rotation_matrix.float()
+    m00 = matrix[..., 0, 0]
+    m01 = matrix[..., 0, 1]
+    m02 = matrix[..., 0, 2]
+    m10 = matrix[..., 1, 0]
+    m11 = matrix[..., 1, 1]
+    m12 = matrix[..., 1, 2]
+    m20 = matrix[..., 2, 0]
+    m21 = matrix[..., 2, 1]
+    m22 = matrix[..., 2, 2]
+
+    q_abs = _sqrt_positive_part(
+        torch.stack(
+            (
+                1.0 + m00 + m11 + m22,
+                1.0 + m00 - m11 - m22,
+                1.0 - m00 + m11 - m22,
+                1.0 - m00 - m11 + m22,
+            ),
+            dim=-1,
+        )
     )
+    quat_by_component = torch.stack(
+        (
+            torch.stack((q_abs[..., 0].square(), m21 - m12, m02 - m20, m10 - m01), dim=-1),
+            torch.stack((m21 - m12, q_abs[..., 1].square(), m01 + m10, m02 + m20), dim=-1),
+            torch.stack((m02 - m20, m01 + m10, q_abs[..., 2].square(), m12 + m21), dim=-1),
+            torch.stack((m10 - m01, m02 + m20, m12 + m21, q_abs[..., 3].square()), dim=-1),
+        ),
+        dim=-2,
+    )
+    candidates = quat_by_component / (2.0 * q_abs[..., None].clamp_min(0.1))
+    selector = F.one_hot(q_abs.argmax(dim=-1), num_classes=4).to(dtype=torch.bool)
+    quaternion = candidates[selector, :].reshape(*q_abs.shape[:-1], 4)
+    quaternion = F.normalize(quaternion, dim=-1, eps=1e-8)
+    return torch.where(quaternion[..., :1] < 0.0, -quaternion, quaternion)
 
-    sine = torch.sin(angle)
-    scale = angle / (2.0 * sine.clamp_min(1e-6))
-    axis_angle = vee * scale.unsqueeze(-1)
 
-    small_angle = angle.abs() < 1e-4
-    first_order = 0.5 * vee
-    return torch.where(small_angle.unsqueeze(-1), first_order, axis_angle).to(original_dtype)
+def quaternion_to_axis_angle(quaternion: torch.Tensor) -> torch.Tensor:
+    """Convert normalized ``wxyz`` quaternions to axis-angle vectors."""
+    if quaternion.shape[-1] != 4:
+        raise ValueError(
+            f"Expected quaternion trailing dimension 4, got {tuple(quaternion.shape)}"
+        )
+    quaternion = F.normalize(quaternion.float(), dim=-1, eps=1e-8)
+    quaternion = torch.where(quaternion[..., :1] < 0.0, -quaternion, quaternion)
+    vector = quaternion[..., 1:]
+    vector_norm = torch.linalg.vector_norm(vector, dim=-1, keepdim=True)
+    half_angle = torch.atan2(vector_norm, quaternion[..., :1])
+    angle = 2.0 * half_angle
+    scale = torch.where(
+        vector_norm > 1e-6,
+        angle / vector_norm.clamp_min(1e-8),
+        2.0 + angle.square() / 12.0,
+    )
+    return vector * scale
+
+
+def _sqrt_positive_part(value: torch.Tensor) -> torch.Tensor:
+    result = torch.zeros_like(value)
+    positive = value > 0.0
+    result[positive] = torch.sqrt(value[positive])
+    return result
 
 
 def axis_angle_to_rotation_6d(axis_angle: torch.Tensor) -> torch.Tensor:

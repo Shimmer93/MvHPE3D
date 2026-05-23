@@ -1,0 +1,35 @@
+name: "mpi_inf_3dhp_stage2_joint_residual"
+
+data:
+  config: "configs/data/mpi_inf_3dhp_stage2.yaml"
+
+model:
+  config: "configs/model/stage2_joint_residual.yaml"
+  learn_betas: false
+  pose_init_mode: "input_residual"
+  zero_init_residual_heads: true
+  proposal_delta_scale: 0.05
+  refinement_delta_scale: 0.05
+  betas_delta_scale: 0.05
+
+loss:
+  pose_6d_weight: 0.0
+  betas_weight: 0.0
+  joint_weight: 1.0
+  articulation_weight: 0.0
+  init_pose_6d_weight: 0.0
+  init_betas_weight: 0.0
+  pose_residual_weight: 0.0
+  betas_residual_weight: 0.0
+  stage2_aux_weight: 0.0
+  supervise_betas: false
+
+optimizer:
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+
+trainer:
+  config: "configs/trainer/default.yaml"
+  precision: "32"
+  gradient_clip_val: 0.5
+  gradient_clip_algorithm: "norm"

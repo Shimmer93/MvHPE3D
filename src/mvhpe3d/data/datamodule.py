@@ -159,9 +159,21 @@ class Stage1HuMManDataModule(L.LightningDataModule):
             )
 
         return {
-            "train": filter_records_by_split(records, self.config.train_split),
-            "val": filter_records_by_split(records, self.config.val_split),
-            "test": filter_records_by_split(records, self.config.test_split),
+            "train": _filter_records_by_split_and_min_views(
+                records,
+                self.config.train_split,
+                min_views=self.config.num_views,
+            ),
+            "val": _filter_records_by_split_and_min_views(
+                records,
+                self.config.val_split,
+                min_views=self.config.num_views,
+            ),
+            "test": _filter_records_by_split_and_min_views(
+                records,
+                self.config.test_split,
+                min_views=self.config.num_views,
+            ),
         }
 
     def _resolve_gt_smpl_dir(self) -> Path:
@@ -188,6 +200,13 @@ class Stage2DataConfig:
     cameras_dir: str | None = None
     input_smpl_cache_dir: str | None = None
     rgb_feature_cache_dir: str | None = None
+    joint_target_dataset: str | None = None
+    joint_target_root: str | None = None
+    joint_target_use_smpl_targets: bool = False
+    joint_target_smpl_joint_source: str = "smpl24"
+    joint_target_joint_regressor_path: str | None = None
+    joint_target_headtop_topk: int = 32
+    joint_target_headtop_axis: str = "y"
     split_config_path: str | None = None
     split_name: str | None = None
     num_views: int = 2
@@ -244,8 +263,29 @@ class Stage2HuMManDataModule(L.LightningDataModule):
         if not manifest_path.exists():
             raise FileNotFoundError(f"Manifest does not exist: {manifest_path}")
         gt_smpl_dir = self._resolve_gt_smpl_dir()
-        if not gt_smpl_dir.exists():
+        needs_gt_smpl = (
+            self.config.joint_target_dataset is None
+            or self.config.joint_target_use_smpl_targets
+        )
+        if needs_gt_smpl and not gt_smpl_dir.exists():
             raise FileNotFoundError(f"GT SMPL directory does not exist: {gt_smpl_dir}")
+        joint_target_root = self._resolve_joint_target_root()
+        if self.config.joint_target_dataset is not None and not joint_target_root.exists():
+            raise FileNotFoundError(f"Joint target root does not exist: {joint_target_root}")
+        if self.config.joint_target_smpl_joint_source in {
+            "regressor",
+            "regressor_headtop_proxy",
+        }:
+            if self.config.joint_target_joint_regressor_path is None:
+                raise ValueError(
+                    "joint_target_joint_regressor_path is required when "
+                    "joint_target_smpl_joint_source uses a regressor"
+                )
+            joint_regressor_path = Path(self.config.joint_target_joint_regressor_path)
+            if not joint_regressor_path.exists():
+                raise FileNotFoundError(
+                    f"Joint target regressor does not exist: {joint_regressor_path}"
+                )
         cameras_dir = self._resolve_cameras_dir()
         if not cameras_dir.exists():
             raise FileNotFoundError(f"Cameras directory does not exist: {cameras_dir}")
@@ -273,6 +313,7 @@ class Stage2HuMManDataModule(L.LightningDataModule):
         cameras_dir = self._resolve_cameras_dir()
         input_smpl_cache_dir = self._resolve_input_smpl_cache_dir()
         rgb_feature_cache_dir = self._resolve_rgb_feature_cache_dir()
+        joint_target_root = self._resolve_joint_target_root()
 
         if stage in (None, "fit"):
             self.train_dataset = HuMManStage2Dataset(
@@ -283,6 +324,9 @@ class Stage2HuMManDataModule(L.LightningDataModule):
                 cameras_dir=cameras_dir,
                 input_smpl_cache_dir=input_smpl_cache_dir,
                 rgb_feature_cache_dir=rgb_feature_cache_dir,
+                joint_target_dataset=self.config.joint_target_dataset,
+                joint_target_root=joint_target_root,
+                joint_target_use_smpl_targets=self.config.joint_target_use_smpl_targets,
                 seed=self.config.seed,
             )
             self.val_dataset = HuMManStage2Dataset(
@@ -293,6 +337,9 @@ class Stage2HuMManDataModule(L.LightningDataModule):
                 cameras_dir=cameras_dir,
                 input_smpl_cache_dir=input_smpl_cache_dir,
                 rgb_feature_cache_dir=rgb_feature_cache_dir,
+                joint_target_dataset=self.config.joint_target_dataset,
+                joint_target_root=joint_target_root,
+                joint_target_use_smpl_targets=self.config.joint_target_use_smpl_targets,
                 seed=self.config.seed,
             )
 
@@ -305,6 +352,9 @@ class Stage2HuMManDataModule(L.LightningDataModule):
                 cameras_dir=cameras_dir,
                 input_smpl_cache_dir=input_smpl_cache_dir,
                 rgb_feature_cache_dir=rgb_feature_cache_dir,
+                joint_target_dataset=self.config.joint_target_dataset,
+                joint_target_root=joint_target_root,
+                joint_target_use_smpl_targets=self.config.joint_target_use_smpl_targets,
                 seed=self.config.seed,
             )
 
@@ -317,6 +367,9 @@ class Stage2HuMManDataModule(L.LightningDataModule):
                 cameras_dir=cameras_dir,
                 input_smpl_cache_dir=input_smpl_cache_dir,
                 rgb_feature_cache_dir=rgb_feature_cache_dir,
+                joint_target_dataset=self.config.joint_target_dataset,
+                joint_target_root=joint_target_root,
+                joint_target_use_smpl_targets=self.config.joint_target_use_smpl_targets,
                 seed=self.config.seed,
             )
 
@@ -371,9 +424,21 @@ class Stage2HuMManDataModule(L.LightningDataModule):
             )
 
         return {
-            "train": filter_records_by_split(records, self.config.train_split),
-            "val": filter_records_by_split(records, self.config.val_split),
-            "test": filter_records_by_split(records, self.config.test_split),
+            "train": _filter_records_by_split_and_min_views(
+                records,
+                self.config.train_split,
+                min_views=self.config.num_views,
+            ),
+            "val": _filter_records_by_split_and_min_views(
+                records,
+                self.config.val_split,
+                min_views=self.config.num_views,
+            ),
+            "test": _filter_records_by_split_and_min_views(
+                records,
+                self.config.test_split,
+                min_views=self.config.num_views,
+            ),
         }
 
     def _resolve_gt_smpl_dir(self) -> Path:
@@ -401,6 +466,14 @@ class Stage2HuMManDataModule(L.LightningDataModule):
         if self.config.rgb_feature_cache_dir is None:
             return None
         return Path(self.config.rgb_feature_cache_dir).resolve()
+
+    def _resolve_joint_target_root(self) -> Path:
+        if self.config.joint_target_root is not None:
+            return Path(self.config.joint_target_root).resolve()
+        if self.config.cameras_dir is not None:
+            return Path(self.config.cameras_dir).resolve()
+        manifest_path = Path(self.config.manifest_path).resolve()
+        return manifest_path.parent.resolve()
 
 
 class Stage3HuMManDataModule(L.LightningDataModule):
@@ -586,9 +659,21 @@ class Stage3HuMManDataModule(L.LightningDataModule):
             )
 
         return {
-            "train": filter_records_by_split(records, self.config.train_split),
-            "val": filter_records_by_split(records, self.config.val_split),
-            "test": filter_records_by_split(records, self.config.test_split),
+            "train": _filter_records_by_split_and_min_views(
+                records,
+                self.config.train_split,
+                min_views=self.config.num_views,
+            ),
+            "val": _filter_records_by_split_and_min_views(
+                records,
+                self.config.val_split,
+                min_views=self.config.num_views,
+            ),
+            "test": _filter_records_by_split_and_min_views(
+                records,
+                self.config.test_split,
+                min_views=self.config.num_views,
+            ),
         }
 
     def _resolve_gt_smpl_dir(self) -> Path:
@@ -627,3 +712,17 @@ class Stage3HuMManDataModule(L.LightningDataModule):
             f"'{split_name}'. Record counts before temporal windowing: {counts}. "
             "Check manifest_path, split_config_path, split_name, and num_views."
         )
+
+
+def _filter_records_by_split_and_min_views(
+    records: list,
+    split: str | None,
+    *,
+    min_views: int,
+) -> list:
+    """Apply split selection and the HeatFormer-style num_views availability filter."""
+    return [
+        record
+        for record in filter_records_by_split(records, split)
+        if len(record.views) >= min_views
+    ]

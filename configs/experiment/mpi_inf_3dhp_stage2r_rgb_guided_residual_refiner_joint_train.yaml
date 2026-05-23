@@ -1,0 +1,41 @@
+name: "mpi_inf_3dhp_stage2r_rgb_guided_residual_refiner_joint_train"
+
+data:
+  config: "configs/data/mpi_inf_3dhp_stage2_pseudo_smpl.yaml"
+
+model:
+  config: "configs/model/stage2r_rgb_guided_residual_refiner_joint_train.yaml"
+  learn_betas: false
+  freeze_backbone: false
+  detach_backbone_outputs: false
+  pose_residual_scale: 0.03
+
+loss:
+  pose_6d_weight: 0.2
+  betas_weight: 0.0
+  joint_weight: 1.0
+  articulation_weight: 0.0
+  init_pose_6d_weight: 0.0
+  init_betas_weight: 0.0
+  pose_residual_weight: 0.05
+  betas_residual_weight: 0.0
+  stage2_aux_weight: 0.25
+  input_projection_weight: 0.05
+  input_projection_charbonnier_eps: 0.001
+  input_projection_min_depth: 0.1
+  input_projection_border_px: 0.0
+  supervise_betas: false
+
+optimizer:
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  stage2_backbone_lr_scale: 0.2
+
+trainer:
+  config: "configs/trainer/default.yaml"
+  max_epochs: 200
+  precision: "32"
+  gradient_clip_val: 0.5
+  gradient_clip_algorithm: "norm"
+  checkpoint_monitor: "val/mpjpe"
+  checkpoint_mode: "min"

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 import cv2
@@ -17,6 +18,7 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from mvhpe3d.data.mpi_inf_3dhp import camera_id_to_index  # noqa: E402
 from mvhpe3d.data.rgb_features import resolve_rgb_feature_cache_path  # noqa: E402
 from mvhpe3d.data.splits import load_sample_records  # noqa: E402
 from mvhpe3d.visualization.smpl_overlay import resolve_rgb_image_path  # noqa: E402
@@ -39,7 +41,10 @@ def parse_args() -> argparse.Namespace:
         "--rgb-dir",
         type=str,
         default=None,
-        help="Directory containing cropped RGB images. Defaults to <manifest_dir>/rgb.",
+        help=(
+            "Directory containing RGB images. Defaults to <manifest_dir>/rgb. "
+            "For --image-layout mpi_inf_3dhp, use data/mpi_inf_3dhp/frames."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -59,6 +64,15 @@ def parse_args() -> argparse.Namespace:
         help="Initialize the timm model without pretrained weights.",
     )
     parser.add_argument(
+        "--checkpoint-path",
+        type=str,
+        default=None,
+        help=(
+            "Optional local timm checkpoint. When set, the model is created without "
+            "online pretrained weight resolution and this checkpoint is loaded instead."
+        ),
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default="auto",
@@ -75,6 +89,39 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--batch-size", type=int, default=128, help="Encoder batch size."
+    )
+    parser.add_argument(
+        "--image-layout",
+        choices=("flat", "mpi_inf_3dhp"),
+        default="flat",
+        help=(
+            "Image path layout. flat expects <sequence>_<camera>_<frame>.<ext>; "
+            "mpi_inf_3dhp expects <sequence>/<camera>/frame_<frame>.jpg."
+        ),
+    )
+    parser.add_argument(
+        "--crop-source",
+        choices=("none", "mpi_inf_3dhp_annot2"),
+        default="none",
+        help="Optional person crop source before encoder resize.",
+    )
+    parser.add_argument(
+        "--dataset-root",
+        type=str,
+        default="/dysData/shimmer/datasets/mpi_inf_3dhp",
+        help="MPI-INF-3DHP dataset root, required for --crop-source mpi_inf_3dhp_annot2.",
+    )
+    parser.add_argument(
+        "--crop-scale",
+        type=float,
+        default=1.25,
+        help="Scale factor applied around the 2D-joint bbox when cropping.",
+    )
+    parser.add_argument(
+        "--min-crop-size",
+        type=float,
+        default=32.0,
+        help="Minimum crop width/height in pixels.",
     )
     parser.add_argument(
         "--max-images",
@@ -96,6 +143,10 @@ def main() -> None:
         raise ValueError(f"--batch-size must be >= 1, got {args.batch_size}")
     if args.image_size is not None and args.image_size < 1:
         raise ValueError(f"--image-size must be >= 1, got {args.image_size}")
+    if args.crop_scale <= 0:
+        raise ValueError(f"--crop-scale must be > 0, got {args.crop_scale}")
+    if args.min_crop_size < 1:
+        raise ValueError(f"--min-crop-size must be >= 1, got {args.min_crop_size}")
     if args.max_images is not None and args.max_images < 1:
         raise ValueError(f"--max-images must be >= 1, got {args.max_images}")
 
@@ -122,7 +173,8 @@ def main() -> None:
     device = resolve_device(args.device)
     model = build_frozen_timm_encoder(
         model_name=args.model_name,
-        pretrained=not args.no_pretrained,
+        pretrained=(not args.no_pretrained and args.checkpoint_path is None),
+        checkpoint_path=args.checkpoint_path,
         device=device,
     )
     image_size = resolve_encoder_image_size(model, requested_image_size=args.image_size)
@@ -139,8 +191,9 @@ def main() -> None:
         if cache_path.exists() and not args.overwrite:
             skipped += 1
             continue
-        image_path = resolve_rgb_image_path(
-            rgb_dir,
+        image_path = resolve_manifest_image_path(
+            rgb_dir=rgb_dir,
+            image_layout=args.image_layout,
             sequence_id=sequence_id,
             camera_id=camera_id,
             frame_id=frame_id,
@@ -152,8 +205,21 @@ def main() -> None:
         if not batch:
             continue
         images = [
-            load_and_preprocess_image(image_path, image_size=image_size)
-            for _sequence_id, _camera_id, _frame_id, image_path, _cache_path in batch
+            load_and_preprocess_image(
+                image_path,
+                image_size=image_size,
+                crop_box=resolve_crop_box(
+                    sequence_id=sequence_id,
+                    camera_id=camera_id,
+                    frame_id=frame_id,
+                    image_path=image_path,
+                    crop_source=args.crop_source,
+                    dataset_root=Path(args.dataset_root),
+                    crop_scale=args.crop_scale,
+                    min_crop_size=args.min_crop_size,
+                ),
+            )
+            for sequence_id, camera_id, frame_id, image_path, _cache_path in batch
         ]
         image_tensor = torch.from_numpy(np.stack(images, axis=0)).to(
             device=device,
@@ -164,13 +230,25 @@ def main() -> None:
         features_np = features.detach().cpu().numpy().astype(np.float32, copy=False)
 
         for item, feature in zip(batch, features_np, strict=True):
-            _sequence_id, _camera_id, _frame_id, image_path, cache_path = item
+            sequence_id, camera_id, frame_id, image_path, cache_path = item
             save_rgb_feature_cache(
                 cache_path,
                 rgb_feature=feature,
                 encoder_name=args.model_name,
                 image_path=image_path,
                 image_size=image_size,
+                image_layout=args.image_layout,
+                crop_source=args.crop_source,
+                crop_box=resolve_crop_box(
+                    sequence_id=sequence_id,
+                    camera_id=camera_id,
+                    frame_id=frame_id,
+                    image_path=image_path,
+                    crop_source=args.crop_source,
+                    dataset_root=Path(args.dataset_root),
+                    crop_scale=args.crop_scale,
+                    min_crop_size=args.min_crop_size,
+                ),
             )
             processed += 1
 
@@ -178,7 +256,10 @@ def main() -> None:
     print(f"RGB dir: {rgb_dir}")
     print(f"Output dir: {output_dir}")
     print(f"Encoder: {args.model_name}")
+    print(f"Checkpoint: {Path(args.checkpoint_path).resolve() if args.checkpoint_path else None}")
     print(f"Image size: {image_size}")
+    print(f"Image layout: {args.image_layout}")
+    print(f"Crop source: {args.crop_source}")
     print(f"Device: {device}")
     print(f"Views: {len(items)}")
     print(f"Processed: {processed}")
@@ -198,11 +279,17 @@ def build_frozen_timm_encoder(
     *,
     model_name: str,
     pretrained: bool,
+    checkpoint_path: str | None,
     device: torch.device,
 ) -> torch.nn.Module:
     import timm
 
-    model = timm.create_model(model_name, pretrained=pretrained, num_classes=0)
+    model = timm.create_model(
+        model_name,
+        pretrained=pretrained,
+        num_classes=0,
+        checkpoint_path=checkpoint_path,
+    )
     model.to(device)
     model.eval()
     for parameter in model.parameters():
@@ -272,10 +359,46 @@ def collect_unique_view_items(records) -> list[tuple[str, str, str]]:
     return sorted(items)
 
 
-def load_and_preprocess_image(image_path: Path, *, image_size: int) -> np.ndarray:
+def resolve_manifest_image_path(
+    *,
+    rgb_dir: Path,
+    image_layout: str,
+    sequence_id: str,
+    camera_id: str,
+    frame_id: str,
+) -> Path:
+    if image_layout == "flat":
+        return resolve_rgb_image_path(
+            rgb_dir,
+            sequence_id=sequence_id,
+            camera_id=camera_id,
+            frame_id=frame_id,
+        )
+    if image_layout == "mpi_inf_3dhp":
+        base = rgb_dir / sequence_id / camera_id
+        stem = f"frame_{frame_id}"
+        for extension in (".jpg", ".jpeg", ".png", ".bmp", ".webp"):
+            candidate = base / f"{stem}{extension}"
+            if candidate.exists():
+                return candidate
+        raise FileNotFoundError(f"Could not find MPI-INF-3DHP frame '{stem}' under {base}")
+    raise ValueError(f"Unsupported image layout: {image_layout!r}")
+
+
+def load_and_preprocess_image(
+    image_path: Path,
+    *,
+    image_size: int,
+    crop_box: np.ndarray | None = None,
+) -> np.ndarray:
     image_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if image_bgr is None:
         raise FileNotFoundError(f"Failed to read RGB image: {image_path}")
+    if crop_box is not None:
+        x1, y1, x2, y2 = crop_box.astype(np.int32).tolist()
+        image_bgr = image_bgr[y1:y2, x1:x2]
+        if image_bgr.size == 0:
+            raise ValueError(f"Empty RGB crop {crop_box.tolist()} for {image_path}")
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     image_rgb = cv2.resize(
         image_rgb,
@@ -285,6 +408,133 @@ def load_and_preprocess_image(image_path: Path, *, image_size: int) -> np.ndarra
     image = image_rgb.astype(np.float32) / 255.0
     image = (image - IMAGENET_MEAN.reshape(1, 1, 3)) / IMAGENET_STD.reshape(1, 1, 3)
     return np.ascontiguousarray(image.transpose(2, 0, 1))
+
+
+def resolve_crop_box(
+    *,
+    sequence_id: str,
+    camera_id: str,
+    frame_id: str,
+    image_path: Path,
+    crop_source: str,
+    dataset_root: Path,
+    crop_scale: float,
+    min_crop_size: float,
+) -> np.ndarray | None:
+    if crop_source == "none":
+        return None
+    image_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    if image_bgr is None:
+        raise FileNotFoundError(f"Failed to read RGB image: {image_path}")
+    height, width = image_bgr.shape[:2]
+    if crop_source == "mpi_inf_3dhp_annot2":
+        return bbox_from_mpi_inf_3dhp_annot2(
+            dataset_root=dataset_root,
+            sequence_id=sequence_id,
+            camera_id=camera_id,
+            frame_id=frame_id,
+            image_width=width,
+            image_height=height,
+            crop_scale=crop_scale,
+            min_crop_size=min_crop_size,
+        )
+    raise ValueError(f"Unsupported crop source: {crop_source!r}")
+
+
+def bbox_from_mpi_inf_3dhp_annot2(
+    *,
+    dataset_root: Path,
+    sequence_id: str,
+    camera_id: str,
+    frame_id: str,
+    image_width: int,
+    image_height: int,
+    crop_scale: float,
+    min_crop_size: float,
+) -> np.ndarray | None:
+    annot2 = load_mpi_inf_3dhp_annot2(str(dataset_root.resolve()), sequence_id)
+    camera_index = camera_id_to_index(camera_id)
+    if camera_index < 0 or camera_index >= annot2.shape[0]:
+        raise IndexError(f"Camera {camera_id} resolved to invalid index {camera_index}")
+    frame_index = int(frame_id)
+    camera_annot2 = np.asarray(annot2[camera_index, 0], dtype=np.float32)
+    if frame_index < 0 or frame_index >= camera_annot2.shape[0]:
+        raise IndexError(
+            f"Frame {frame_id} is out of range for {sequence_id}/{camera_id}: "
+            f"{camera_annot2.shape[0]} annotated frames"
+        )
+    joints = camera_annot2[frame_index].reshape(-1, 2)
+    finite = np.isfinite(joints).all(axis=1)
+    inside = (
+        finite
+        & (joints[:, 0] >= 0)
+        & (joints[:, 0] < image_width)
+        & (joints[:, 1] >= 0)
+        & (joints[:, 1] < image_height)
+    )
+    selected = joints[inside] if int(inside.sum()) >= 4 else joints[finite]
+    if selected.shape[0] < 4:
+        return None
+    x1, y1 = selected.min(axis=0)
+    x2, y2 = selected.max(axis=0)
+    return scale_and_clip_bbox(
+        x1=x1,
+        y1=y1,
+        x2=x2,
+        y2=y2,
+        image_width=image_width,
+        image_height=image_height,
+        crop_scale=crop_scale,
+        min_crop_size=min_crop_size,
+    )
+
+
+@lru_cache(maxsize=32)
+def load_mpi_inf_3dhp_annot2(dataset_root: str, sequence_id: str):
+    import scipy.io as sio
+
+    subject_id, sequence_name = sequence_id.split("_", maxsplit=1)
+    path = Path(dataset_root) / subject_id / sequence_name / "annot.mat"
+    if not path.exists():
+        raise FileNotFoundError(f"MPI-INF-3DHP annot.mat does not exist: {path}")
+    payload = sio.loadmat(path)
+    if "annot2" not in payload:
+        raise KeyError(f"Missing annot2 in {path}")
+    return payload["annot2"]
+
+
+def scale_and_clip_bbox(
+    *,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    image_width: int,
+    image_height: int,
+    crop_scale: float,
+    min_crop_size: float,
+) -> np.ndarray | None:
+    width = max(float(x2 - x1), min_crop_size)
+    height = max(float(y2 - y1), min_crop_size)
+    side = max(width, height) * float(crop_scale)
+    cx = (float(x1) + float(x2)) * 0.5
+    cy = (float(y1) + float(y2)) * 0.5
+    half = side * 0.5
+    clipped_x1 = max(0.0, cx - half)
+    clipped_y1 = max(0.0, cy - half)
+    clipped_x2 = min(float(image_width), cx + half)
+    clipped_y2 = min(float(image_height), cy + half)
+    if clipped_x2 - clipped_x1 < 1 or clipped_y2 - clipped_y1 < 1:
+        return None
+    return np.asarray(
+        [
+            int(np.floor(clipped_x1)),
+            int(np.floor(clipped_y1)),
+            int(np.ceil(clipped_x2)),
+            int(np.ceil(clipped_y2)),
+        ],
+        dtype=np.int32,
+    )
 
 
 def normalize_feature_output(features: torch.Tensor | tuple | list) -> torch.Tensor:
@@ -308,6 +558,9 @@ def save_rgb_feature_cache(
     encoder_name: str,
     image_path: Path,
     image_size: int,
+    image_layout: str,
+    crop_source: str,
+    crop_box: np.ndarray | None,
 ) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
@@ -316,6 +569,13 @@ def save_rgb_feature_cache(
         encoder_name=np.asarray(encoder_name),
         image_path=np.asarray(str(image_path)),
         image_size=np.asarray([image_size, image_size], dtype=np.int32),
+        image_layout=np.asarray(image_layout),
+        crop_source=np.asarray(crop_source),
+        crop_box=(
+            np.asarray(crop_box, dtype=np.int32)
+            if crop_box is not None
+            else np.asarray([], dtype=np.int32)
+        ),
         valid=np.asarray(True),
     )
 

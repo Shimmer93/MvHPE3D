@@ -20,11 +20,22 @@ class CameraParameters:
 
 
 def resolve_camera_json_path(cameras_dir: str | Path, *, sequence_id: str) -> Path:
-    """Resolve the HuMMan sequence-level camera JSON path."""
-    cameras_path = Path(cameras_dir).resolve() / f"{sequence_id}_cameras.json"
-    if not cameras_path.exists():
-        raise FileNotFoundError(f"Camera JSON does not exist: {cameras_path}")
-    return cameras_path
+    """Resolve a sequence-level camera calibration path.
+
+    Supports the original HuMMan layout (`{sequence_id}_cameras.json`) and the
+    MPI-INF-3DHP layout (`S*/Seq*/camera.calibration`) for sequence ids like
+    `S1_Seq1`.
+    """
+    root = Path(cameras_dir).resolve()
+    candidates = [root / f"{sequence_id}_cameras.json"]
+    if "_" in sequence_id:
+        subject_id, sequence_name = sequence_id.split("_", maxsplit=1)
+        candidates.append(root / subject_id / sequence_name / "camera.calibration")
+    for cameras_path in candidates:
+        if cameras_path.exists():
+            return cameras_path
+    searched = ", ".join(str(path) for path in candidates)
+    raise FileNotFoundError(f"Camera calibration does not exist. Searched: {searched}")
 
 
 def camera_id_to_camera_key(camera_id: str) -> str:
@@ -43,8 +54,11 @@ def load_camera_parameters(
     sequence_id: str,
     camera_id: str,
 ) -> CameraParameters:
-    """Load one camera calibration entry from the HuMMan JSON file."""
+    """Load one camera calibration entry from HuMMan or MPI-INF-3DHP files."""
     camera_json_path = resolve_camera_json_path(cameras_dir, sequence_id=sequence_id)
+    if camera_json_path.name == "camera.calibration":
+        return _load_mpii3d_camera(camera_json_path, camera_id=camera_id)
+
     payload = json.loads(camera_json_path.read_text(encoding="utf-8"))
     camera_key = camera_id_to_camera_key(camera_id)
     if camera_key not in payload:
@@ -56,6 +70,54 @@ def load_camera_parameters(
         rotation=np.asarray(camera_payload["R"], dtype=np.float32),
         translation=np.asarray(camera_payload["T"], dtype=np.float32),
     )
+
+
+def _load_mpii3d_camera(camera_path: Path, *, camera_id: str) -> CameraParameters:
+    camera_index = _parse_mpii3d_camera_id(camera_id)
+    lines = camera_path.read_text(encoding="utf-8").splitlines()
+    for line_index, line in enumerate(lines):
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "name" and int(parts[1]) == camera_index:
+            intrinsic = _parse_mpii3d_calibration_matrix(
+                lines[line_index + 4],
+                label="intrinsic",
+                camera_path=camera_path,
+            )
+            extrinsic = _parse_mpii3d_calibration_matrix(
+                lines[line_index + 5],
+                label="extrinsic",
+                camera_path=camera_path,
+            )
+            return CameraParameters(
+                intrinsics=intrinsic[:3, :3].astype(np.float32, copy=False),
+                rotation=extrinsic[:3, :3].astype(np.float32, copy=False),
+                translation=(extrinsic[:3, 3] * 0.001).astype(np.float32, copy=False),
+            )
+    raise KeyError(f"MPI-INF-3DHP camera '{camera_id}' was not found in {camera_path}")
+
+
+def _parse_mpii3d_camera_id(camera_id: str) -> int:
+    text = str(camera_id)
+    if text.startswith("video_"):
+        text = text.split("_", maxsplit=1)[1]
+    return int(text)
+
+
+def _parse_mpii3d_calibration_matrix(
+    line: str,
+    *,
+    label: str,
+    camera_path: Path,
+) -> np.ndarray:
+    parts = line.split()
+    if not parts or parts[0] != label:
+        raise ValueError(f"Expected '{label}' line in {camera_path}, got: {line}")
+    values = np.asarray([float(value) for value in parts[1:]], dtype=np.float32)
+    if values.shape[0] != 16:
+        raise ValueError(
+            f"Expected 16 values for '{label}' in {camera_path}, got {values.shape[0]}"
+        )
+    return values.reshape(4, 4)
 
 
 def transform_smpl_world_to_camera(

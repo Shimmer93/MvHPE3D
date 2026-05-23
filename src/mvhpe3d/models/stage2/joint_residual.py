@@ -28,6 +28,11 @@ class Stage2JointResidualConfig:
     proposal_layers: int = 3
     weight_head_layers: int = 2
     refinement_layers: int = 3
+    proposal_delta_scale: float = 0.05
+    refinement_delta_scale: float = 0.05
+    betas_delta_scale: float = 0.05
+    pose_init_mode: str = "learned"
+    zero_init_residual_heads: bool = False
     dropout: float = 0.1
 
     @property
@@ -102,6 +107,13 @@ class Stage2JointResidualModel(nn.Module):
             num_layers=config.refinement_layers,
             dropout=config.dropout,
         )
+        if config.zero_init_residual_heads:
+            _zero_last_linear(self.pose_proposal_head)
+            _zero_last_linear(self.pose_refinement_head)
+            if self.betas_proposal_head is not None:
+                _zero_last_linear(self.betas_proposal_head)
+            if self.betas_refinement_head is not None:
+                _zero_last_linear(self.betas_refinement_head)
 
     def forward(self, views_input: torch.Tensor) -> dict[str, torch.Tensor]:
         if views_input.ndim != 3:
@@ -116,11 +128,48 @@ class Stage2JointResidualModel(nn.Module):
             )
 
         batch_size, num_views, _ = views_input.shape
+        input_pose = views_input[:, :, : self.config.pose_6d_dim].reshape(
+            batch_size,
+            num_views,
+            self.config.num_joints,
+            6,
+        )
+        input_betas = views_input[:, :, self.config.pose_6d_dim :]
         encoded_views = self.view_encoder(views_input.reshape(batch_size * num_views, -1))
         encoded_views = encoded_views.reshape(batch_size, num_views, -1)
 
-        per_view_pose = self.pose_proposal_head(encoded_views.reshape(batch_size * num_views, -1))
-        per_view_pose = per_view_pose.reshape(batch_size, num_views, self.config.num_joints, 6)
+        pose_proposal_delta = self.pose_proposal_head(
+            encoded_views.reshape(batch_size * num_views, -1)
+        )
+        pose_proposal_delta = pose_proposal_delta.reshape(
+            batch_size,
+            num_views,
+            self.config.num_joints,
+            6,
+        )
+        if self.config.pose_init_mode == "learned":
+            per_view_pose = pose_proposal_delta
+        elif self.config.pose_init_mode == "input_residual":
+            per_view_pose = (
+                input_pose
+                + self.config.proposal_delta_scale * torch.tanh(pose_proposal_delta)
+            )
+        elif self.config.pose_init_mode == "identity_residual":
+            per_view_pose = (
+                _identity_pose_6d(
+                    batch_size=batch_size,
+                    num_views=num_views,
+                    num_joints=self.config.num_joints,
+                    device=views_input.device,
+                    dtype=views_input.dtype,
+                )
+                + self.config.proposal_delta_scale * torch.tanh(pose_proposal_delta)
+            )
+        else:
+            raise ValueError(
+                "pose_init_mode must be one of 'learned', 'input_residual', "
+                f"or 'identity_residual', got {self.config.pose_init_mode!r}"
+            )
 
         pose_logits = self.pose_weight_head(encoded_views.reshape(batch_size * num_views, -1))
         pose_logits = pose_logits.reshape(batch_size, num_views, self.config.num_joints)
@@ -149,14 +198,23 @@ class Stage2JointResidualModel(nn.Module):
         pose_delta = self.pose_refinement_head(
             refinement_features.reshape(batch_size * self.config.num_joints, -1)
         ).reshape(batch_size, self.config.num_joints, 6)
+        if self.config.pose_init_mode != "learned":
+            pose_delta = self.config.refinement_delta_scale * torch.tanh(pose_delta)
         pred_pose_6d = init_pose_6d + pose_delta
 
         if self.config.learn_betas:
             assert self.betas_proposal_head is not None
             assert self.betas_refinement_head is not None
-            per_view_betas = self.betas_proposal_head(
+            betas_proposal_delta = self.betas_proposal_head(
                 encoded_views.reshape(batch_size * num_views, -1)
             ).reshape(batch_size, num_views, self.config.betas_dim)
+            if self.config.pose_init_mode == "learned":
+                per_view_betas = betas_proposal_delta
+            else:
+                per_view_betas = (
+                    input_betas
+                    + self.config.betas_delta_scale * torch.tanh(betas_proposal_delta)
+                )
             beta_logits = self.beta_weight_head(encoded_views.reshape(batch_size * num_views, -1))
             beta_logits = beta_logits.reshape(batch_size, num_views)
             beta_weights = torch.softmax(beta_logits, dim=1)
@@ -169,10 +227,12 @@ class Stage2JointResidualModel(nn.Module):
             betas_delta = self.betas_refinement_head(
                 torch.cat((pooled_feature, init_betas, beta_dispersion), dim=-1)
             )
+            if self.config.pose_init_mode != "learned":
+                betas_delta = self.config.betas_delta_scale * torch.tanh(betas_delta)
             pred_betas = init_betas + betas_delta
             view_weights = beta_weights
         else:
-            init_betas = views_input[:, :, self.config.pose_6d_dim :].mean(dim=1)
+            init_betas = input_betas.mean(dim=1)
             pred_betas = init_betas
             view_weights = pose_weights.mean(dim=-1)
 
@@ -186,3 +246,24 @@ class Stage2JointResidualModel(nn.Module):
             "view_weights": view_weights,
             "pose_view_weights": pose_weights,
         }
+
+
+def _zero_last_linear(module: nn.Module) -> None:
+    for child in reversed(list(module.modules())):
+        if isinstance(child, nn.Linear):
+            nn.init.zeros_(child.weight)
+            if child.bias is not None:
+                nn.init.zeros_(child.bias)
+            return
+
+
+def _identity_pose_6d(
+    *,
+    batch_size: int,
+    num_views: int,
+    num_joints: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    identity = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], device=device, dtype=dtype)
+    return identity.view(1, 1, 1, 6).expand(batch_size, num_views, num_joints, 6)

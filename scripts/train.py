@@ -233,16 +233,16 @@ def build_data_config(
         data_kwargs["seed"] = args.seed
     if args.fast_dev_run:
         data_kwargs["drop_last_train"] = False
-    if data_name in {"humman_stage2", "humman_stage3"}:
+    if data_name in {"humman_stage2", "humman_stage3", "mpi_inf_3dhp_stage2"}:
         input_smpl_cache_dir = getattr(args, "input_smpl_cache_dir", None)
         if input_smpl_cache_dir is not None:
             data_kwargs["input_smpl_cache_dir"] = input_smpl_cache_dir
     rgb_feature_cache_dir = getattr(args, "rgb_feature_cache_dir", None)
-    if data_name == "humman_stage2" and rgb_feature_cache_dir is not None:
+    if data_name in {"humman_stage2", "mpi_inf_3dhp_stage2"} and rgb_feature_cache_dir is not None:
         data_kwargs["rgb_feature_cache_dir"] = rgb_feature_cache_dir
     if data_name == "humman_stage3":
         return Stage3DataConfig(**data_kwargs)
-    if data_name == "humman_stage2":
+    if data_name in {"humman_stage2", "mpi_inf_3dhp_stage2"}:
         return Stage2DataConfig(**data_kwargs)
 
     return Stage1DataConfig(**data_kwargs)
@@ -389,12 +389,18 @@ def build_trainer_config(
     root_dir = resolve_default_root_dir(args, experiment_name=experiment_name)
     logger = build_loggers(root_dir=root_dir, experiment_name=experiment_name)
     csv_logger = logger[0] if isinstance(logger, list) else logger
+    checkpoint_monitor = str(trainer_kwargs.pop("checkpoint_monitor", "val/loss"))
+    checkpoint_mode = str(trainer_kwargs.pop("checkpoint_mode", "min"))
+    checkpoint_save_top_k = int(trainer_kwargs.pop("checkpoint_save_top_k", 1))
+    checkpoint_filename = str(
+        trainer_kwargs.pop("checkpoint_filename", "{epoch:03d}-{step:06d}")
+    )
     checkpoint = ModelCheckpoint(
         dirpath=str(Path(csv_logger.log_dir) / "checkpoints"),
-        filename="{epoch:03d}-{step:06d}",
-        monitor="val/loss",
-        mode="min",
-        save_top_k=1,
+        filename=checkpoint_filename,
+        monitor=checkpoint_monitor,
+        mode=checkpoint_mode,
+        save_top_k=checkpoint_save_top_k,
         save_last=True,
     )
 
@@ -542,6 +548,7 @@ def build_lightning_module(
     data_config: Stage1DataConfig | Stage2DataConfig | Stage3DataConfig,
     args: argparse.Namespace,
 ):
+    stage2_external_joint_kwargs = build_stage2_external_joint_kwargs(data_config)
     if isinstance(model_config, Stage2RRGBGuidedResidualRefinerConfig):
         return Stage2RRGBGuidedResidualRefinerLightningModule(
             model_config=model_config,
@@ -549,6 +556,7 @@ def build_lightning_module(
             optimization_config=optimization_config,
             smpl_model_path=args.smpl_model_path,
             stage2_checkpoint_path=args.stage2_checkpoint_path,
+            **stage2_external_joint_kwargs,
         )
     if isinstance(model_config, (Stage3TemporalRefineConfig, Stage3ViewTimeTokenConfig)):
         return Stage3TemporalLightningModule(
@@ -571,6 +579,7 @@ def build_lightning_module(
             loss_config=loss_config,
             optimization_config=optimization_config,
             smpl_model_path=args.smpl_model_path,
+            **stage2_external_joint_kwargs,
         )
     return Stage1FusionLightningModule(
         model_config=model_config,
@@ -580,6 +589,19 @@ def build_lightning_module(
         mhr_assets_dir=args.mhr_assets_dir,
         input_smpl_cache_dir=resolve_input_smpl_cache_dir(args, data_config),
     )
+
+
+def build_stage2_external_joint_kwargs(
+    data_config: Stage1DataConfig | Stage2DataConfig | Stage3DataConfig,
+) -> dict[str, object]:
+    if not isinstance(data_config, Stage2DataConfig):
+        return {}
+    return {
+        "external_joint_source": data_config.joint_target_smpl_joint_source,
+        "external_joint_regressor_path": data_config.joint_target_joint_regressor_path,
+        "external_headtop_topk": data_config.joint_target_headtop_topk,
+        "external_headtop_axis": data_config.joint_target_headtop_axis,
+    }
 
 
 def is_stage2_or_stage3_experiment(experiment: dict[str, Any]) -> bool:
@@ -592,7 +614,7 @@ def is_stage2_or_stage3_experiment(experiment: dict[str, Any]) -> bool:
         "stage2r_rgb_guided_residual_refiner",
         "stage3_temporal_refine",
         "stage3_view_time_token",
-    } or data_name in {"humman_stage2", "humman_stage3"}
+    } or data_name in {"humman_stage2", "humman_stage3", "mpi_inf_3dhp_stage2"}
 
 
 if __name__ == "__main__":

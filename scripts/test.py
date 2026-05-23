@@ -201,15 +201,15 @@ def build_data_config(
     if args.seed is not None:
         data_kwargs["seed"] = args.seed
     input_smpl_cache_dir = getattr(args, "input_smpl_cache_dir", None)
-    if data_name in {"humman_stage2", "humman_stage3"} and input_smpl_cache_dir is not None:
+    if data_name in {"humman_stage2", "humman_stage3", "mpi_inf_3dhp_stage2"} and input_smpl_cache_dir is not None:
         data_kwargs["input_smpl_cache_dir"] = input_smpl_cache_dir
     rgb_feature_cache_dir = getattr(args, "rgb_feature_cache_dir", None)
-    if data_name == "humman_stage2" and rgb_feature_cache_dir is not None:
+    if data_name in {"humman_stage2", "mpi_inf_3dhp_stage2"} and rgb_feature_cache_dir is not None:
         data_kwargs["rgb_feature_cache_dir"] = rgb_feature_cache_dir
 
     if data_name == "humman_stage3":
         return Stage3DataConfig(**data_kwargs)
-    if data_name == "humman_stage2":
+    if data_name in {"humman_stage2", "mpi_inf_3dhp_stage2"}:
         return Stage2DataConfig(**data_kwargs)
     return Stage1DataConfig(**data_kwargs)
 
@@ -387,7 +387,7 @@ def is_stage2_or_stage3_experiment(experiment: dict[str, Any]) -> bool:
         "stage2r_rgb_guided_residual_refiner",
         "stage3_temporal_refine",
         "stage3_view_time_token",
-    } or data_name in {"humman_stage2", "humman_stage3"}
+    } or data_name in {"humman_stage2", "humman_stage3", "mpi_inf_3dhp_stage2"}
 
 
 if __name__ == "__main__":
