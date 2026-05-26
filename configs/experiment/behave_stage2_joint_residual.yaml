@@ -1,7 +1,7 @@
-name: "mpi_inf_3dhp_stage2_pseudo_smpl_joint_residual"
+name: "behave_stage2_joint_residual"
 
 data:
-  config: "configs/data/mpi_inf_3dhp_stage2_pseudo_smpl.yaml"
+  config: "configs/data/behave_stage2.yaml"
 
 model:
   config: "configs/model/stage2_joint_residual.yaml"
@@ -22,14 +22,8 @@ loss:
   pose_residual_weight: 0.0
   betas_residual_weight: 0.0
   stage2_aux_weight: 0.0
-  input_projection_weight: 0.3
-  input_projection_charbonnier_eps: 0.001
-  input_projection_min_depth: 0.1
-  input_projection_border_px: 0.0
-  gt_projection_weight: 0.15
-  gt_projection_charbonnier_eps: 0.001
-  gt_projection_min_depth: 0.1
-  gt_projection_border_px: 0.0
+  input_projection_weight: 0.0
+  gt_projection_weight: 0.0
   supervise_betas: false
 
 optimizer:
@@ -38,9 +32,9 @@ optimizer:
 
 trainer:
   config: "configs/trainer/default.yaml"
-  max_epochs: 200
+  max_epochs: 100
   precision: "32"
   gradient_clip_val: 0.5
   gradient_clip_algorithm: "norm"
-  checkpoint_monitor: "val/auc"
-  checkpoint_mode: "max"
+  checkpoint_monitor: "val/pa_mpjpe"
+  checkpoint_mode: "min"

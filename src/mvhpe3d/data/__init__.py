@@ -18,6 +18,12 @@ from .mpi_inf_3dhp import (
     MPII3D_TRAIN_SUBJECTS,
     MPII3D_VAL_SUBJECTS,
 )
+from .behave import (
+    BEHAVE_HEATFORMER_CAMERA_IDS,
+    BEHAVE_HEATFORMER_JOINT_COUNT,
+    BEHAVE_HEATFORMER_ROOT_INDEX,
+    BEHAVE_HEATFORMER_SCORE_THRESHOLD,
+)
 from .rgb_features import load_rgb_feature_payload, resolve_rgb_feature_cache_path
 
 __all__ = [
@@ -27,6 +33,10 @@ __all__ = [
     "MPII3D_SEQUENCES",
     "MPII3D_TRAIN_SUBJECTS",
     "MPII3D_VAL_SUBJECTS",
+    "BEHAVE_HEATFORMER_CAMERA_IDS",
+    "BEHAVE_HEATFORMER_JOINT_COUNT",
+    "BEHAVE_HEATFORMER_ROOT_INDEX",
+    "BEHAVE_HEATFORMER_SCORE_THRESHOLD",
     "Stage1DataConfig",
     "Stage1HuMManDataModule",
     "Stage2DataConfig",

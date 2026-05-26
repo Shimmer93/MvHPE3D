@@ -107,7 +107,17 @@ class Stage2FusionLightningModule(L.LightningModule):
         views_input: torch.Tensor,
         *,
         view_rgb_feature: torch.Tensor | None = None,
+        view_image_size: torch.Tensor | None = None,
+        view_aux: dict[str, torch.Tensor] | None = None,
+        target_joint_smpl_indices: torch.Tensor | None = None,
+        target_joint_root_index: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
+        del (
+            view_image_size,
+            view_aux,
+            target_joint_smpl_indices,
+            target_joint_root_index,
+        )
         if view_rgb_feature is not None:
             self._assert_finite_tensor("batch/view_rgb_feature", view_rgb_feature)
         return self.model(views_input)
@@ -152,6 +162,10 @@ class Stage2FusionLightningModule(L.LightningModule):
         predictions = self(
             batch["views_input"],
             view_rgb_feature=batch.get("view_rgb_feature"),
+            view_image_size=batch.get("view_aux", {}).get("image_size"),
+            view_aux=batch.get("view_aux"),
+            target_joint_smpl_indices=batch.get("target_joint_smpl_indices"),
+            target_joint_root_index=batch.get("target_joint_root_index"),
         )
         return {
             "pred_body_pose": predictions["pred_body_pose"],
@@ -206,6 +220,10 @@ class Stage2FusionLightningModule(L.LightningModule):
         predictions = self(
             batch["views_input"],
             view_rgb_feature=batch.get("view_rgb_feature"),
+            view_image_size=batch.get("view_aux", {}).get("image_size"),
+            view_aux=batch.get("view_aux"),
+            target_joint_smpl_indices=batch.get("target_joint_smpl_indices"),
+            target_joint_root_index=batch.get("target_joint_root_index"),
         )
         for name, value in predictions.items():
             if torch.is_tensor(value):
@@ -216,6 +234,16 @@ class Stage2FusionLightningModule(L.LightningModule):
                 "batch/target_joint_confidence",
                 batch["target_joint_confidence"],
             )
+            if "target_camera_joints" in batch:
+                self._assert_finite_tensor(
+                    "batch/target_camera_joints",
+                    batch["target_camera_joints"],
+                )
+            if "target_camera_joint_confidence" in batch:
+                self._assert_finite_tensor(
+                    "batch/target_camera_joint_confidence",
+                    batch["target_camera_joint_confidence"],
+                )
         if use_smpl_targets:
             losses = self.criterion(
                 pred_pose_6d=predictions["pred_pose_6d"],
@@ -231,15 +259,26 @@ class Stage2FusionLightningModule(L.LightningModule):
         for name, value in losses.items():
             self._assert_finite_tensor(f"losses/{name}", value)
         if use_joint_targets:
-            pred_joints, target_joints, joint_weight = self._build_external_joint_pair(
-                pred_body_pose=predictions["pred_body_pose"],
-                pred_betas=predictions["pred_betas"],
-                target_joints=batch["target_joints"],
-                target_joint_confidence=batch["target_joint_confidence"],
-                target_joint_smpl_indices=batch["target_joint_smpl_indices"],
-                target_joint_root_index=batch["target_joint_root_index"],
-                view_aux=batch["view_aux"],
-            )
+            if "pred_external_joints" in predictions:
+                pred_joints = predictions["pred_external_joints"]
+                target_joints, joint_weight = self._build_external_target_joints(
+                    target_joints=batch["target_joints"],
+                    target_joint_confidence=batch["target_joint_confidence"],
+                    target_joint_root_index=batch["target_joint_root_index"],
+                    view_aux=batch["view_aux"],
+                    device=pred_joints.device,
+                    dtype=pred_joints.dtype,
+                )
+            else:
+                pred_joints, target_joints, joint_weight = self._build_external_joint_pair(
+                    pred_body_pose=predictions["pred_body_pose"],
+                    pred_betas=predictions["pred_betas"],
+                    target_joints=batch["target_joints"],
+                    target_joint_confidence=batch["target_joint_confidence"],
+                    target_joint_smpl_indices=batch["target_joint_smpl_indices"],
+                    target_joint_root_index=batch["target_joint_root_index"],
+                    view_aux=batch["view_aux"],
+                )
             joint_loss = self._weighted_joint_mse(pred_joints, target_joints, joint_weight)
         else:
             pred_joints, target_joints = self._build_canonical_joint_pair(
@@ -270,6 +309,12 @@ class Stage2FusionLightningModule(L.LightningModule):
         )
         for name, value in input_projection_losses.items():
             self._assert_finite_tensor(f"losses/{name}", value)
+        gt_projection_losses = self._compute_gt_projection_losses(
+            predictions=predictions,
+            batch=batch,
+        )
+        for name, value in gt_projection_losses.items():
+            self._assert_finite_tensor(f"losses/{name}", value)
         total_loss = (
             losses["loss"]
             + self.loss_config.joint_weight * joint_loss
@@ -277,6 +322,8 @@ class Stage2FusionLightningModule(L.LightningModule):
             + self.loss_config.stage2_aux_weight * stage2_aux_losses["stage2_aux_loss"]
             + self.loss_config.input_projection_weight
             * input_projection_losses["input_projection_loss"]
+            + self.loss_config.gt_projection_weight
+            * gt_projection_losses["gt_projection_loss"]
         )
         self._assert_finite_tensor("losses/total_loss", total_loss)
         metrics = {
@@ -305,6 +352,15 @@ class Stage2FusionLightningModule(L.LightningModule):
             f"{stage}/input_projection_valid_ratio": input_projection_losses[
                 "input_projection_valid_ratio"
             ],
+            f"{stage}/loss_gt_projection": gt_projection_losses[
+                "gt_projection_loss"
+            ],
+            f"{stage}/gt_projection_error_px": gt_projection_losses[
+                "gt_projection_error_px"
+            ],
+            f"{stage}/gt_projection_valid_ratio": gt_projection_losses[
+                "gt_projection_valid_ratio"
+            ],
         }
         metrics.update(
             self._compute_rgb_residual_diagnostics(
@@ -320,6 +376,12 @@ class Stage2FusionLightningModule(L.LightningModule):
                     pred_joints=pred_joints,
                     target_joints=target_joints,
                     joint_weight=joint_weight,
+                    target_joint_root_index=batch.get("target_joint_root_index"),
+                    target_camera_joints=batch.get("target_camera_joints"),
+                    target_camera_joint_confidence=batch.get(
+                        "target_camera_joint_confidence"
+                    ),
+                    view_aux=batch.get("view_aux"),
                 )
             else:
                 joint_metrics = self._compute_canonical_joint_metrics(
@@ -339,8 +401,27 @@ class Stage2FusionLightningModule(L.LightningModule):
                     {
                         f"{stage}/pck_150": joint_metrics["pck_150"],
                         f"{stage}/auc": joint_metrics["auc"],
+                        f"{stage}/root_pck_150": joint_metrics["root_pck_150"],
+                        f"{stage}/root_auc": joint_metrics["root_auc"],
                     }
                 )
+                if "target_camera_joints" in batch:
+                    input_joint_metrics = self._compute_external_input_joint_metrics(
+                        views_input=batch["views_input"],
+                        view_aux=batch["view_aux"],
+                        target_camera_joints=batch["target_camera_joints"],
+                        target_camera_joint_confidence=batch.get(
+                            "target_camera_joint_confidence"
+                        ),
+                        target_joint_smpl_indices=batch["target_joint_smpl_indices"],
+                        target_joint_root_index=batch["target_joint_root_index"],
+                    )
+                    metrics.update(
+                        {
+                            f"{stage}/input_mpjpe": input_joint_metrics["mpjpe"],
+                            f"{stage}/input_pa_mpjpe": input_joint_metrics["pa_mpjpe"],
+                        }
+                    )
                 if use_smpl_targets:
                     canonical_pseudo_metrics = self._compute_canonical_joint_metrics(
                         pred_body_pose=predictions["pred_body_pose"],
@@ -364,6 +445,12 @@ class Stage2FusionLightningModule(L.LightningModule):
                     pred_joints=pred_joints,
                     target_joints=target_joints,
                     joint_weight=joint_weight,
+                    target_joint_root_index=batch.get("target_joint_root_index"),
+                    target_camera_joints=batch.get("target_camera_joints"),
+                    target_camera_joint_confidence=batch.get(
+                        "target_camera_joint_confidence"
+                    ),
+                    view_aux=batch.get("view_aux"),
                 )
             else:
                 joint_metrics = self._compute_test_joint_metrics(
@@ -385,8 +472,27 @@ class Stage2FusionLightningModule(L.LightningModule):
                     {
                         "test/pck_150": joint_metrics["pck_150"],
                         "test/auc": joint_metrics["auc"],
+                        "test/root_pck_150": joint_metrics["root_pck_150"],
+                        "test/root_auc": joint_metrics["root_auc"],
                     }
                 )
+                if "target_camera_joints" in batch:
+                    input_joint_metrics = self._compute_external_input_joint_metrics(
+                        views_input=batch["views_input"],
+                        view_aux=batch["view_aux"],
+                        target_camera_joints=batch["target_camera_joints"],
+                        target_camera_joint_confidence=batch.get(
+                            "target_camera_joint_confidence"
+                        ),
+                        target_joint_smpl_indices=batch["target_joint_smpl_indices"],
+                        target_joint_root_index=batch["target_joint_root_index"],
+                    )
+                    metrics.update(
+                        {
+                            "test/input_mpjpe": input_joint_metrics["mpjpe"],
+                            "test/input_pa_mpjpe": input_joint_metrics["pa_mpjpe"],
+                        }
+                    )
                 if use_smpl_targets:
                     canonical_pseudo_metrics = self._compute_canonical_joint_metrics(
                         pred_body_pose=predictions["pred_body_pose"],
@@ -481,6 +587,16 @@ class Stage2FusionLightningModule(L.LightningModule):
             )
         return metrics
 
+    @staticmethod
+    def _weighted_mean(
+        values: torch.Tensor,
+        weights: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if weights is None:
+            return values.mean()
+        weights = weights.to(device=values.device, dtype=values.dtype)
+        return (values * weights).sum() / weights.sum().clamp_min(1.0)
+
     def _compute_input_projection_losses(
         self,
         *,
@@ -569,6 +685,151 @@ class Stage2FusionLightningModule(L.LightningModule):
             "input_projection_error_px": pixel_error,
             "input_projection_valid_ratio": valid_ratio,
         }
+
+    def _compute_gt_projection_losses(
+        self,
+        *,
+        predictions: dict[str, torch.Tensor],
+        batch: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        zero = predictions["pred_body_pose"].new_zeros(())
+        if self.loss_config.gt_projection_weight <= 0.0:
+            return {
+                "gt_projection_loss": zero,
+                "gt_projection_error_px": zero,
+                "gt_projection_valid_ratio": zero,
+            }
+        if "target_joints_2d" not in batch:
+            return {
+                "gt_projection_loss": zero,
+                "gt_projection_error_px": zero,
+                "gt_projection_valid_ratio": zero,
+            }
+        view_aux = batch.get("view_aux")
+        if view_aux is None:
+            return {
+                "gt_projection_loss": zero,
+                "gt_projection_error_px": zero,
+                "gt_projection_valid_ratio": zero,
+            }
+        required_keys = {"cam_int", "image_size", "input_global_orient", "input_transl"}
+        if not required_keys.issubset(view_aux):
+            missing = sorted(required_keys.difference(view_aux))
+            raise KeyError(
+                "gt_projection_weight requires view_aux fields: "
+                f"{', '.join(missing)}"
+            )
+
+        pred_camera_joints = self._build_pred_projection_joints(
+            pred_body_pose=predictions["pred_body_pose"],
+            pred_betas=predictions["pred_betas"],
+            views_input=batch["views_input"],
+            view_aux=view_aux,
+            target_joint_smpl_indices=batch.get("target_joint_smpl_indices"),
+        )
+        cam_int = view_aux["cam_int"].to(
+            device=pred_camera_joints.device,
+            dtype=pred_camera_joints.dtype,
+        )
+        image_size = view_aux["image_size"].to(
+            device=pred_camera_joints.device,
+            dtype=pred_camera_joints.dtype,
+        )
+        target_uv = batch["target_joints_2d"].to(
+            device=pred_camera_joints.device,
+            dtype=pred_camera_joints.dtype,
+        )
+        target_confidence = batch.get("target_joints_2d_confidence")
+        if target_confidence is None:
+            target_confidence = torch.ones(
+                target_uv.shape[:-1],
+                device=target_uv.device,
+                dtype=target_uv.dtype,
+            )
+        else:
+            target_confidence = target_confidence.to(
+                device=target_uv.device,
+                dtype=target_uv.dtype,
+            )
+        pred_uv, pred_depth = self._project_camera_joints(
+            pred_camera_joints,
+            intrinsics=cam_int,
+        )
+        valid = self._gt_projection_valid_mask(
+            pred_uv=pred_uv,
+            pred_depth=pred_depth,
+            target_uv=target_uv,
+            target_confidence=target_confidence,
+            image_size=image_size,
+        )
+        valid_float = valid.to(dtype=pred_uv.dtype)
+        focal_scale = (
+            0.5 * (cam_int[..., 0, 0].abs() + cam_int[..., 1, 1].abs())
+        ).clamp_min(1.0)
+        normalized_delta = (pred_uv - target_uv) / focal_scale[..., None, None]
+        normalized_delta = torch.where(
+            valid[..., None],
+            normalized_delta,
+            torch.zeros_like(normalized_delta),
+        )
+        eps = float(self.loss_config.gt_projection_charbonnier_eps)
+        per_joint_loss = torch.sqrt(
+            normalized_delta.square().sum(dim=-1) + eps * eps
+        ) - eps
+        denom = valid_float.sum().clamp_min(1.0)
+        projection_loss = (per_joint_loss * valid_float).sum() / denom
+        pixel_delta = pred_uv.detach() - target_uv.detach()
+        pixel_delta = torch.where(
+            valid[..., None],
+            pixel_delta,
+            torch.zeros_like(pixel_delta),
+        )
+        pixel_error = torch.linalg.norm(pixel_delta, dim=-1)
+        pixel_error = (pixel_error * valid_float).sum() / denom
+        valid_ratio = valid_float.mean()
+        return {
+            "gt_projection_loss": projection_loss,
+            "gt_projection_error_px": pixel_error,
+            "gt_projection_valid_ratio": valid_ratio,
+        }
+
+    def _build_pred_projection_joints(
+        self,
+        *,
+        pred_body_pose: torch.Tensor,
+        pred_betas: torch.Tensor,
+        views_input: torch.Tensor,
+        view_aux: dict[str, torch.Tensor],
+        target_joint_smpl_indices: torch.Tensor | None,
+    ) -> torch.Tensor:
+        batch_size, num_views = views_input.shape[:2]
+        camera_global_orient = view_aux["input_global_orient"].to(
+            device=pred_body_pose.device,
+            dtype=pred_body_pose.dtype,
+        ).reshape(batch_size * num_views, 3)
+        camera_transl = view_aux["input_transl"].to(
+            device=pred_body_pose.device,
+            dtype=pred_body_pose.dtype,
+        ).reshape(batch_size * num_views, 3)
+        pred_output = self._build_smpl_output(
+            body_pose=pred_body_pose[:, None, :]
+            .expand(batch_size, num_views, -1)
+            .reshape(batch_size * num_views, -1),
+            betas=pred_betas[:, None, :]
+            .expand(batch_size, num_views, -1)
+            .reshape(batch_size * num_views, -1),
+            global_orient=camera_global_orient,
+            transl=camera_transl,
+        )
+        smpl_indices = self._resolve_projection_smpl_indices(
+            target_joint_smpl_indices=target_joint_smpl_indices,
+            device=pred_body_pose.device,
+        )
+        pred_joints = self._select_external_pred_joints(
+            smpl_output=pred_output,
+            smpl_indices=smpl_indices,
+        )
+        return pred_joints.reshape(batch_size, num_views, pred_joints.shape[1], 3)
 
     def _build_input_projection_joints(
         self,
@@ -674,6 +935,30 @@ class Stage2FusionLightningModule(L.LightningModule):
             & (input_uv[..., 0] <= image_width - 1.0 - border)
             & (input_uv[..., 1] >= border)
             & (input_uv[..., 1] <= image_height - 1.0 - border)
+        )
+
+    def _gt_projection_valid_mask(
+        self,
+        *,
+        pred_uv: torch.Tensor,
+        pred_depth: torch.Tensor,
+        target_uv: torch.Tensor,
+        target_confidence: torch.Tensor,
+        image_size: torch.Tensor,
+    ) -> torch.Tensor:
+        min_depth = float(self.loss_config.gt_projection_min_depth)
+        border = float(self.loss_config.gt_projection_border_px)
+        image_width = image_size[..., 0].clamp_min(1.0)[..., None]
+        image_height = image_size[..., 1].clamp_min(1.0)[..., None]
+        return (
+            torch.isfinite(pred_uv).all(dim=-1)
+            & torch.isfinite(target_uv).all(dim=-1)
+            & (pred_depth > min_depth)
+            & (target_confidence > 0.05)
+            & (target_uv[..., 0] >= border)
+            & (target_uv[..., 0] <= image_width - 1.0 - border)
+            & (target_uv[..., 1] >= border)
+            & (target_uv[..., 1] <= image_height - 1.0 - border)
         )
 
     @staticmethod
@@ -790,17 +1075,35 @@ class Stage2FusionLightningModule(L.LightningModule):
             smpl_indices=smpl_indices,
         )
         pred_joints = pred_joints - pred_joints[:, root_index : root_index + 1, :]
+        transformed_target_joints, joint_weight = self._build_external_target_joints(
+            target_joints=target_joints,
+            target_joint_confidence=target_joint_confidence,
+            target_joint_root_index=target_joint_root_index,
+            view_aux=view_aux,
+            device=pred_body_pose.device,
+            dtype=pred_joints.dtype,
+        )
+        return pred_joints, transformed_target_joints, joint_weight
+
+    def _build_external_target_joints(
+        self,
+        *,
+        target_joints: torch.Tensor,
+        target_joint_confidence: torch.Tensor,
+        target_joint_root_index: torch.Tensor,
+        view_aux: dict[str, torch.Tensor],
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        root_index = int(target_joint_root_index.reshape(-1)[0].item())
         transformed_target_joints = self._transform_world_joints_to_input_root_frame(
-            target_joints=target_joints.to(device=pred_body_pose.device, dtype=pred_joints.dtype),
+            target_joints=target_joints.to(device=device, dtype=dtype),
             view_aux=view_aux,
             root_index=root_index,
         )
-        joint_weight = target_joint_confidence.to(
-            device=pred_body_pose.device,
-            dtype=pred_joints.dtype,
-        ).clamp_min(0.0)
+        joint_weight = target_joint_confidence.to(device=device, dtype=dtype).clamp_min(0.0)
         joint_weight = joint_weight * (joint_weight > 0.05).to(joint_weight.dtype)
-        return pred_joints, transformed_target_joints, joint_weight
+        return transformed_target_joints, joint_weight
 
     def _select_external_pred_joints(
         self,
@@ -812,10 +1115,11 @@ class Stage2FusionLightningModule(L.LightningModule):
         if source == "smpl24":
             pred_smpl_joints = smpl_output.joints[:, :SMPL_EVAL_NUM_JOINTS, :]
             return pred_smpl_joints.index_select(1, smpl_indices)
-        if source not in {"regressor", "regressor_headtop_proxy"}:
+        if source not in {"regressor", "regressor_headtop_proxy", "body25_regressor15"}:
             raise ValueError(
                 "Unsupported external_joint_source="
-                f"{source!r}. Expected smpl24, regressor, or regressor_headtop_proxy."
+                f"{source!r}. Expected smpl24, regressor, regressor_headtop_proxy, "
+                "or body25_regressor15."
             )
 
         regressor, regressor_input = self._get_external_joint_regressor(
@@ -828,6 +1132,13 @@ class Stage2FusionLightningModule(L.LightningModule):
             pred_joints = torch.einsum("jk,bkc->bjc", regressor, smpl_output.joints)
         else:
             raise ValueError(f"Unsupported external joint regressor input {regressor_input!r}")
+
+        if source == "body25_regressor15":
+            if pred_joints.shape[1] < 15:
+                raise ValueError(
+                    f"body25_regressor15 requires at least 15 joints, got {pred_joints.shape[1]}"
+                )
+            return pred_joints[:, :15, :]
 
         if source == "regressor_headtop_proxy":
             headtop_vertex_ids = self._get_external_headtop_vertex_ids(
@@ -872,11 +1183,12 @@ class Stage2FusionLightningModule(L.LightningModule):
             regressor = np.asarray(np.load(resolved_path, allow_pickle=False), dtype=np.float32)
         if regressor.ndim != 2:
             raise ValueError(f"External joint regressor must be 2D, got {regressor.shape}")
-        if regressor.shape[0] != 17 and regressor.shape[1] == 17:
+        if regressor.shape[0] not in {15, 17, 25} and regressor.shape[1] in {15, 17, 25}:
             regressor = regressor.T
-        if regressor.shape[0] != 17:
+        if regressor.shape[0] not in {15, 17, 25}:
             raise ValueError(
-                f"Expected external joint regressor to have 17 output joints, got {regressor.shape}"
+                "Expected external joint regressor to have 15, 17, or 25 output joints, "
+                f"got {regressor.shape}"
             )
         if regressor.shape[1] == 6890:
             regressor_input = "vertices"
@@ -967,16 +1279,282 @@ class Stage2FusionLightningModule(L.LightningModule):
         pred_joints: torch.Tensor,
         target_joints: torch.Tensor,
         joint_weight: torch.Tensor,
+        target_joint_root_index: torch.Tensor | None = None,
+        target_camera_joints: torch.Tensor | None = None,
+        target_camera_joint_confidence: torch.Tensor | None = None,
+        view_aux: dict[str, torch.Tensor] | None = None,
     ) -> dict[str, torch.Tensor]:
-        mpjpe = self._weighted_mpjpe(pred_joints, target_joints, joint_weight)
-        pa_mpjpe = self._weighted_pa_mpjpe(pred_joints, target_joints, joint_weight)
-        pck_150, auc = self._weighted_pck_auc(pred_joints, target_joints, joint_weight)
+        root_index = (
+            int(target_joint_root_index.reshape(-1)[0].item())
+            if target_joint_root_index is not None
+            else 0
+        )
+        if target_camera_joints is not None:
+            return self._compute_heatformer_external_joint_metrics(
+                pred_joints=pred_joints,
+                target_camera_joints=target_camera_joints,
+                target_camera_joint_confidence=target_camera_joint_confidence,
+                view_aux=view_aux,
+                root_index=root_index,
+            )
+
+        root_pred_joints = pred_joints - pred_joints[:, root_index : root_index + 1, :]
+        root_target_joints = target_joints - target_joints[:, root_index : root_index + 1, :]
+        mpjpe = self._weighted_mpjpe(root_pred_joints, root_target_joints, joint_weight)
+        with torch.no_grad(), torch.autocast(device_type=pred_joints.device.type, enabled=False):
+            aligned_pred = self._weighted_similarity_align(
+                root_pred_joints.float(),
+                root_target_joints.float(),
+                joint_weight.float(),
+            )
+        pa_mpjpe = self._weighted_mpjpe(
+            aligned_pred,
+            root_target_joints.float(),
+            joint_weight.float(),
+        )
+        pck_150, auc = self._weighted_pck_auc(
+            aligned_pred,
+            root_target_joints.float(),
+            joint_weight.float(),
+        )
+        root_pck_150, root_auc = self._weighted_pck_auc(
+            root_pred_joints,
+            root_target_joints,
+            joint_weight,
+        )
         return {
             "mpjpe": mpjpe,
             "pa_mpjpe": pa_mpjpe,
             "pck_150": pck_150,
             "auc": auc,
+            "root_pck_150": root_pck_150,
+            "root_auc": root_auc,
         }
+
+    def _compute_heatformer_external_joint_metrics(
+        self,
+        *,
+        pred_joints: torch.Tensor,
+        target_camera_joints: torch.Tensor,
+        target_camera_joint_confidence: torch.Tensor | None,
+        view_aux: dict[str, torch.Tensor] | None,
+        root_index: int = 0,
+    ) -> dict[str, torch.Tensor]:
+        if target_camera_joints.ndim != 4 or target_camera_joints.shape[-1] != 3:
+            raise ValueError(
+                "target_camera_joints must have shape [B, V, J, 3], "
+                f"got {tuple(target_camera_joints.shape)}"
+            )
+        if view_aux is None or "input_global_orient" not in view_aux:
+            raise KeyError(
+                "HeatFormer-style external metrics require view_aux['input_global_orient']"
+            )
+
+        target_camera_joints = target_camera_joints.to(
+            device=pred_joints.device,
+            dtype=pred_joints.dtype,
+        )
+        batch_size, num_views, joint_count, _ = target_camera_joints.shape
+        if pred_joints.shape[:2] != (batch_size, joint_count):
+            raise ValueError(
+                f"Expected pred_joints shape {(batch_size, joint_count, 3)}, "
+                f"got {tuple(pred_joints.shape)}"
+            )
+
+        root_pred_joints = pred_joints - pred_joints[:, root_index : root_index + 1, :]
+        input_root_rotation = axis_angle_to_matrix(
+            view_aux["input_global_orient"].to(
+                device=pred_joints.device,
+                dtype=pred_joints.dtype,
+            )
+        )
+        pred_camera_joints = torch.matmul(
+            root_pred_joints[:, None].unsqueeze(-2),
+            input_root_rotation.transpose(-1, -2)[:, :, None],
+        ).squeeze(-2)
+
+        root_target_joints = (
+            target_camera_joints
+            - target_camera_joints[:, :, root_index : root_index + 1, :]
+        )
+        flat_pred = pred_camera_joints.reshape(batch_size * num_views, joint_count, 3)
+        flat_target = root_target_joints.reshape(batch_size * num_views, joint_count, 3)
+        if target_camera_joint_confidence is None:
+            flat_weight = torch.ones(
+                (batch_size * num_views, joint_count),
+                device=pred_joints.device,
+                dtype=pred_joints.dtype,
+            )
+        else:
+            flat_weight = target_camera_joint_confidence.to(
+                device=pred_joints.device,
+                dtype=pred_joints.dtype,
+            ).reshape(batch_size * num_views, joint_count)
+            flat_weight = flat_weight * (flat_weight > 0.05).to(flat_weight.dtype)
+
+        if joint_count == 15 and root_index == 8:
+            visibility = flat_weight[..., None]
+            mpjpe = (
+                torch.linalg.norm(flat_pred * visibility - flat_target * visibility, dim=-1)
+                .mean(dim=-1)
+                .mean()
+                * 1000.0
+            )
+            with torch.no_grad(), torch.autocast(device_type=pred_joints.device.type, enabled=False):
+                aligned_pred = batch_similarity_align(flat_pred.float(), flat_target.float())
+            pa_mpjpe = (
+                torch.linalg.norm(
+                    aligned_pred * visibility.float() - flat_target.float() * visibility.float(),
+                    dim=-1,
+                )
+                .mean(dim=-1)
+                .mean()
+                * 1000.0
+            )
+            pck_150, auc = self._weighted_pck_auc(
+                aligned_pred,
+                flat_target.float(),
+                flat_weight.float(),
+            )
+            root_pck_150, root_auc = self._weighted_pck_auc(
+                flat_pred,
+                flat_target,
+                flat_weight,
+            )
+            return {
+                "mpjpe": mpjpe,
+                "pa_mpjpe": pa_mpjpe,
+                "pck_150": pck_150,
+                "auc": auc,
+                "root_pck_150": root_pck_150,
+                "root_auc": root_auc,
+            }
+
+        mpjpe = self._weighted_mpjpe(flat_pred, flat_target, flat_weight)
+        with torch.no_grad(), torch.autocast(device_type=pred_joints.device.type, enabled=False):
+            aligned_pred = self._weighted_similarity_align(
+                flat_pred.float(),
+                flat_target.float(),
+                flat_weight.float(),
+            )
+        pa_mpjpe = self._weighted_mpjpe(
+            aligned_pred,
+            flat_target.float(),
+            flat_weight.float(),
+        )
+        pck_150, auc = self._weighted_pck_auc(
+            aligned_pred,
+            flat_target.float(),
+            flat_weight.float(),
+        )
+        root_pck_150, root_auc = self._weighted_pck_auc(
+            flat_pred,
+            flat_target,
+            flat_weight,
+        )
+        return {
+            "mpjpe": mpjpe,
+            "pa_mpjpe": pa_mpjpe,
+            "pck_150": pck_150,
+            "auc": auc,
+            "root_pck_150": root_pck_150,
+            "root_auc": root_auc,
+        }
+
+    def _compute_external_input_joint_metrics(
+        self,
+        *,
+        views_input: torch.Tensor,
+        view_aux: dict[str, torch.Tensor],
+        target_camera_joints: torch.Tensor,
+        target_camera_joint_confidence: torch.Tensor | None,
+        target_joint_smpl_indices: torch.Tensor,
+        target_joint_root_index: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        batch_size, num_views = views_input.shape[:2]
+        pose_6d_dim = self.model_config.pose_6d_dim
+        input_pose_6d = views_input[..., :pose_6d_dim].reshape(
+            batch_size,
+            num_views,
+            self.model_config.num_joints,
+            6,
+        )
+        input_body_pose = rotation_6d_to_axis_angle(
+            input_pose_6d.reshape(-1, self.model_config.num_joints, 6)
+        ).reshape(batch_size * num_views, -1)
+        input_betas = views_input[..., pose_6d_dim:].reshape(batch_size * num_views, -1)
+        camera_global_orient = view_aux["input_global_orient"].to(
+            device=views_input.device,
+            dtype=views_input.dtype,
+        ).reshape(batch_size * num_views, 3)
+        camera_transl = view_aux["input_transl"].to(
+            device=views_input.device,
+            dtype=views_input.dtype,
+        ).reshape(batch_size * num_views, 3)
+        input_output = self._build_smpl_output(
+            body_pose=input_body_pose.to(device=views_input.device, dtype=views_input.dtype),
+            betas=input_betas.to(device=views_input.device, dtype=views_input.dtype),
+            global_orient=camera_global_orient,
+            transl=camera_transl,
+        )
+        smpl_indices = self._resolve_projection_smpl_indices(
+            target_joint_smpl_indices=target_joint_smpl_indices,
+            device=views_input.device,
+        )
+        input_joints = self._select_external_pred_joints(
+            smpl_output=input_output,
+            smpl_indices=smpl_indices,
+        )
+        joint_count = input_joints.shape[1]
+        input_joints = input_joints.reshape(batch_size, num_views, joint_count, 3)
+        target_camera_joints = target_camera_joints.to(
+            device=views_input.device,
+            dtype=views_input.dtype,
+        )
+        root_index = int(target_joint_root_index.reshape(-1)[0].item())
+        flat_pred = (
+            input_joints - input_joints[:, :, root_index : root_index + 1, :]
+        ).reshape(batch_size * num_views, joint_count, 3)
+        flat_target = (
+            target_camera_joints
+            - target_camera_joints[:, :, root_index : root_index + 1, :]
+        ).reshape(batch_size * num_views, joint_count, 3)
+        if target_camera_joint_confidence is None:
+            flat_weight = torch.ones(
+                (batch_size * num_views, joint_count),
+                device=views_input.device,
+                dtype=views_input.dtype,
+            )
+        else:
+            flat_weight = target_camera_joint_confidence.to(
+                device=views_input.device,
+                dtype=views_input.dtype,
+            ).reshape(batch_size * num_views, joint_count)
+            flat_weight = flat_weight * (flat_weight > 0.05).to(flat_weight.dtype)
+
+        if joint_count == 15 and root_index == 8:
+            visibility = flat_weight[..., None]
+            mpjpe = (
+                torch.linalg.norm(flat_pred * visibility - flat_target * visibility, dim=-1)
+                .mean(dim=-1)
+                .mean()
+                * 1000.0
+            )
+            with torch.no_grad(), torch.autocast(device_type=views_input.device.type, enabled=False):
+                aligned_pred = batch_similarity_align(flat_pred.float(), flat_target.float())
+            pa_mpjpe = (
+                torch.linalg.norm(
+                    aligned_pred * visibility.float() - flat_target.float() * visibility.float(),
+                    dim=-1,
+                )
+                .mean(dim=-1)
+                .mean()
+                * 1000.0
+            )
+        else:
+            mpjpe = self._weighted_mpjpe(flat_pred, flat_target, flat_weight)
+            pa_mpjpe = self._weighted_pa_mpjpe(flat_pred, flat_target, flat_weight)
+        return {"mpjpe": mpjpe, "pa_mpjpe": pa_mpjpe}
 
     @staticmethod
     def _weighted_joint_mse(
@@ -1307,7 +1885,17 @@ class Stage2RRGBGuidedResidualRefinerLightningModule(Stage2FusionLightningModule
         views_input: torch.Tensor,
         *,
         view_rgb_feature: torch.Tensor | None = None,
+        view_image_size: torch.Tensor | None = None,
+        view_aux: dict[str, torch.Tensor] | None = None,
+        target_joint_smpl_indices: torch.Tensor | None = None,
+        target_joint_root_index: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
+        del (
+            view_image_size,
+            view_aux,
+            target_joint_smpl_indices,
+            target_joint_root_index,
+        )
         if view_rgb_feature is None:
             raise ValueError(
                 "Stage2RRGBGuidedResidualRefinerLightningModule requires view_rgb_feature."
@@ -1368,8 +1956,8 @@ class Stage2RRGBGuidedResidualRefinerLightningModule(Stage2FusionLightningModule
                 "stage2_aux_betas": zero,
             }
 
-        stage2_pose = predictions["stage2_pred_pose_6d"]
-        stage2_betas = predictions["stage2_pred_betas"]
+        stage2_pose = predictions.get("stage2_pred_pose_6d", predictions["pred_pose_6d"])
+        stage2_betas = predictions.get("stage2_pred_betas", predictions["pred_betas"])
         target_pose = batch["target_body_pose_6d"].to(
             device=stage2_pose.device,
             dtype=stage2_pose.dtype,
@@ -1430,6 +2018,7 @@ class Stage2RRGBGuidedResidualRefinerLightningModule(Stage2FusionLightningModule
         return self.stage2_backbone(views_input)
 
 
+
 def _coerce_dataclass_config(value, config_type):
     if value is None:
         return config_type()
@@ -1453,6 +2042,7 @@ def _coerce_rgb_residual_model_config(value):
         "Expected Stage2RRGBGuidedResidualRefinerConfig, dict, or None; "
         f"got {type(value)!r}"
     )
+
 
 
 def _coerce_stage2_model_config(value):

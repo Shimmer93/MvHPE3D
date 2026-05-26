@@ -224,6 +224,12 @@ def require_field(
         raise ValueError(f"Field '{key}' in {payload.zip.filename} must not be scalar")
     if value.ndim == 2 and value.shape[0] == 1:
         value = value[0]
+    elif value.ndim == 2:
+        raise ValueError(
+            f"Field '{key}' in {payload.zip.filename} has {value.shape[0]} people; "
+            "expected exactly one selected person. Rebuild the manifest after filtering "
+            "invalid SAM3DBody outputs."
+        )
     if value.shape[-1] != expected_last_dim:
         raise ValueError(
             f"Field '{key}' in {payload.zip.filename} has shape {value.shape}, "

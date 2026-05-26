@@ -91,6 +91,11 @@ MPII3D_HEATFORMER_TO_SMPL24: tuple[int, ...] = (
 )
 
 MPII3D_HEATFORMER_ROOT_INDEX = 0
+MPII3D_HEATFORMER_LEG_SWAP_PAIRS: tuple[tuple[int, int], ...] = (
+    (1, 4),
+    (2, 5),
+    (3, 6),
+)
 
 
 def parse_sequence_id(sequence_id: str) -> tuple[str, str]:
@@ -148,6 +153,7 @@ def load_mpii3d_joint_target(
 
     frame_index = int(frame_id)
     per_view_world_joints = []
+    per_view_camera_joints = []
     for camera_id in camera_ids:
         camera_index = camera_id_to_index(camera_id)
         camera_joints_mm = np.asarray(payload[key][camera_index, 0], dtype=np.float32)
@@ -157,6 +163,11 @@ def load_mpii3d_joint_target(
                 f"with {camera_joints_mm.shape[0]} annotated frames"
             )
         joints_camera = camera_joints_mm[frame_index].reshape(-1, 3) * 0.001
+        per_view_camera_joints.append(
+            _apply_heatformer_leg_swap(
+                joints_camera[list(MPII3D_HEATFORMER_EVAL_JOINTS)]
+            )
+        )
         camera = load_camera_parameters(root, sequence_id=sequence_id, camera_id=str(camera_id))
         joints_world = (
             (joints_camera - camera.translation[None, :])
@@ -165,12 +176,65 @@ def load_mpii3d_joint_target(
         per_view_world_joints.append(joints_world)
 
     joints_world = np.mean(np.stack(per_view_world_joints, axis=0), axis=0)
-    selected = joints_world[list(MPII3D_HEATFORMER_EVAL_JOINTS)]
+    selected = _apply_heatformer_leg_swap(
+        joints_world[list(MPII3D_HEATFORMER_EVAL_JOINTS)]
+    )
+    camera_selected = np.stack(per_view_camera_joints, axis=0)
     return {
         "joints": np.ascontiguousarray(selected.astype(np.float32, copy=False)),
         "confidence": np.ones((len(MPII3D_HEATFORMER_EVAL_JOINTS),), dtype=np.float32),
+        "camera_joints": np.ascontiguousarray(
+            camera_selected.astype(np.float32, copy=False)
+        ),
+        "camera_confidence": np.ones(
+            (len(camera_ids), len(MPII3D_HEATFORMER_EVAL_JOINTS)),
+            dtype=np.float32,
+        ),
         "smpl_indices": np.asarray(MPII3D_HEATFORMER_TO_SMPL24, dtype=np.int64),
         "root_index": np.asarray(MPII3D_HEATFORMER_ROOT_INDEX, dtype=np.int64),
+    }
+
+
+def load_mpii3d_joint_2d_target(
+    root: str | Path,
+    *,
+    sequence_id: str,
+    frame_id: str,
+    camera_ids: tuple[str, ...] | list[str] = MPII3D_HEATFORMER_CAMERA_IDS,
+) -> dict[str, np.ndarray]:
+    """Load HeatFormer-order MPI-INF-3DHP 2D joints for selected cameras.
+
+    The annotations are in image pixels and are returned per view in the same
+    camera order requested by the Stage 2 sample.
+    """
+    seq_dir = sequence_dir(root, sequence_id)
+    payload = load_annotation_mat(str(seq_dir))
+    if "annot2" not in payload:
+        raise KeyError(f"Annotation payload {seq_dir / 'annot.mat'} is missing 'annot2'")
+
+    frame_index = int(frame_id)
+    per_view_joints = []
+    per_view_confidence = []
+    for camera_id in camera_ids:
+        camera_index = camera_id_to_index(camera_id)
+        camera_joints = np.asarray(payload["annot2"][camera_index, 0], dtype=np.float32)
+        if frame_index < 0 or frame_index >= camera_joints.shape[0]:
+            raise IndexError(
+                f"Frame {frame_index} is out of range for {sequence_id} camera {camera_id} "
+                f"with {camera_joints.shape[0]} annotated frames"
+            )
+        joints_2d = camera_joints[frame_index].reshape(-1, 2)
+        selected = _apply_heatformer_leg_swap(
+            joints_2d[list(MPII3D_HEATFORMER_EVAL_JOINTS)]
+        )
+        confidence = np.isfinite(selected).all(axis=-1).astype(np.float32)
+        confidence = _apply_heatformer_leg_swap(confidence)
+        per_view_joints.append(selected.astype(np.float32, copy=False))
+        per_view_confidence.append(confidence)
+
+    return {
+        "joints_2d": np.ascontiguousarray(np.stack(per_view_joints, axis=0)),
+        "confidence": np.ascontiguousarray(np.stack(per_view_confidence, axis=0)),
     }
 
 
@@ -179,3 +243,18 @@ def annotation_frame_count(root: str | Path, *, sequence_id: str) -> int:
     payload = load_annotation_mat(str(sequence_dir(root, sequence_id)))
     annot = np.asarray(payload["annot3"][0, 0])
     return int(annot.shape[0])
+
+
+def _apply_heatformer_leg_swap(values: np.ndarray) -> np.ndarray:
+    """Apply HeatFormer's MPI-INF-3DHP lower-body left/right correction."""
+    swapped = np.asarray(values).copy()
+    joint_axis = -2 if swapped.ndim >= 2 else -1
+    for left, right in MPII3D_HEATFORMER_LEG_SWAP_PAIRS:
+        left_index = [slice(None)] * swapped.ndim
+        right_index = [slice(None)] * swapped.ndim
+        left_index[joint_axis] = left
+        right_index[joint_axis] = right
+        left_value = swapped[tuple(left_index)].copy()
+        swapped[tuple(left_index)] = swapped[tuple(right_index)]
+        swapped[tuple(right_index)] = left_value
+    return swapped

@@ -12,11 +12,21 @@ from mvhpe3d.data.rgb_features import (
     load_rgb_feature_payload,
     resolve_rgb_feature_cache_path,
 )
-from mvhpe3d.data.mpi_inf_3dhp import load_mpii3d_joint_target
+from mvhpe3d.data.mpi_inf_3dhp import (
+    load_mpii3d_joint_2d_target,
+    load_mpii3d_joint_target,
+)
+from mvhpe3d.data.behave import (
+    load_behave_camera,
+    load_behave_joint_2d_target,
+    load_behave_joint_target,
+)
 from mvhpe3d.utils import (
+    CameraParameters,
     axis_angle_to_rotation_6d,
     cache_path_for_source_npz,
     load_camera_parameters,
+    transform_smpl_world_to_camera,
 )
 
 from ..canonicalization import canonicalize_stage2_target
@@ -72,7 +82,14 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
         self._canonical_target_cache: dict[tuple[str, str], dict[str, np.ndarray]] = {}
         self._rgb_feature_cache: dict[str, np.ndarray] = {}
         self._camera_cache: dict[tuple[str, str], tuple[np.ndarray, np.ndarray]] = {}
-        self._joint_target_cache: dict[tuple[str, str], dict[str, np.ndarray]] = {}
+        self._joint_target_cache: dict[
+            tuple[str, str, tuple[str, ...]],
+            dict[str, np.ndarray],
+        ] = {}
+        self._joint_2d_target_cache: dict[
+            tuple[str, str, tuple[str, ...]],
+            dict[str, np.ndarray],
+        ] = {}
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         record = self.records[index]
@@ -96,7 +113,14 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
             view_aux["pred_cam_t"].append(
                 self._require_field(payload, "pred_cam_t", expected_last_dim=3)
             )
-            view_aux["cam_int"].append(self._require_matrix(payload, "cam_int", shape=(3, 3)))
+            if self.joint_target_dataset == "behave":
+                _, _, intrinsics = self._load_behave_view_camera(
+                    record=record,
+                    camera_id=view.camera_id,
+                )
+                view_aux["cam_int"].append(intrinsics)
+            else:
+                view_aux["cam_int"].append(self._require_matrix(payload, "cam_int", shape=(3, 3)))
             view_aux["image_size"].append(
                 self._require_field(payload, "image_size", expected_last_dim=2)
             )
@@ -107,10 +131,16 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
                 self._require_field(fitted_payload, "transl", expected_last_dim=3)
             )
             if self.uses_joint_targets:
-                camera_rotation, camera_translation = self._load_view_camera(
-                    sequence_id=record.sequence_id,
-                    camera_id=view.camera_id,
-                )
+                if self.joint_target_dataset == "behave":
+                    camera_rotation, camera_translation, _ = self._load_behave_view_camera(
+                        record=record,
+                        camera_id=view.camera_id,
+                    )
+                else:
+                    camera_rotation, camera_translation = self._load_view_camera(
+                        sequence_id=record.sequence_id,
+                        camera_id=view.camera_id,
+                    )
                 view_aux.setdefault("camera_rotation", []).append(camera_rotation)
                 view_aux.setdefault("camera_translation", []).append(camera_translation)
             if self.rgb_feature_cache_dir is not None:
@@ -137,6 +167,7 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
                 canonical_target = self._zero_canonical_target()
                 camera_target_aux = self._zero_camera_target_aux(num_views=self.num_views)
             joint_target = self._load_joint_target(record, camera_ids=camera_ids)
+            joint_2d_target = self._load_joint_2d_target(record, camera_ids=camera_ids)
         else:
             target_payload = self._load_gt_target(record)
             canonical_target = self._load_canonical_target(record)
@@ -146,6 +177,7 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
                 target_payload=target_payload,
             )
             joint_target = None
+            joint_2d_target = None
 
         sample = {
             "views_input": torch.from_numpy(np.stack(view_inputs, axis=0)),
@@ -183,6 +215,14 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
         if joint_target is not None:
             sample["target_joints"] = torch.from_numpy(joint_target["joints"])
             sample["target_joint_confidence"] = torch.from_numpy(joint_target["confidence"])
+            if "camera_joints" in joint_target:
+                sample["target_camera_joints"] = torch.from_numpy(
+                    joint_target["camera_joints"]
+                )
+            if "camera_confidence" in joint_target:
+                sample["target_camera_joint_confidence"] = torch.from_numpy(
+                    joint_target["camera_confidence"]
+                )
             sample["target_joint_smpl_indices"] = torch.from_numpy(joint_target["smpl_indices"])
             sample["target_joint_root_index"] = torch.as_tensor(
                 int(joint_target["root_index"]),
@@ -191,6 +231,11 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
             sample["target_smpl_valid"] = torch.as_tensor(
                 self.joint_target_use_smpl_targets,
                 dtype=torch.bool,
+            )
+        if joint_2d_target is not None:
+            sample["target_joints_2d"] = torch.from_numpy(joint_2d_target["joints_2d"])
+            sample["target_joints_2d_confidence"] = torch.from_numpy(
+                joint_2d_target["confidence"]
             )
         return sample
 
@@ -228,6 +273,65 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
                 sequence_id=record.sequence_id,
             )
         return target_payload
+
+    def _build_camera_frame_target_aux(
+        self,
+        *,
+        record,
+        camera_ids: list[str],
+        target_payload: dict[str, np.ndarray],
+    ) -> dict[str, np.ndarray]:
+        if self.joint_target_dataset != "behave":
+            return super()._build_camera_frame_target_aux(
+                record=record,
+                camera_ids=camera_ids,
+                target_payload=target_payload,
+            )
+
+        world_global_orient = self._require_field(
+            target_payload,
+            "global_orient",
+            expected_last_dim=3,
+        )
+        world_transl = self._require_field(target_payload, "transl", expected_last_dim=3)
+        camera_global_orients = []
+        camera_translations = []
+        camera_rotations = []
+        camera_translation_vectors = []
+        for camera_id in camera_ids:
+            rotation, translation, intrinsics = self._load_behave_view_camera(
+                record=record,
+                camera_id=camera_id,
+            )
+            camera = CameraParameters(
+                intrinsics=intrinsics,
+                rotation=rotation,
+                translation=translation,
+            )
+            camera_global_orient, camera_transl = transform_smpl_world_to_camera(
+                global_orient=world_global_orient,
+                transl=world_transl,
+                camera=camera,
+            )
+            camera_global_orients.append(camera_global_orient)
+            camera_translations.append(camera_transl)
+            camera_rotations.append(rotation)
+            camera_translation_vectors.append(translation)
+
+        return {
+            "camera_rotation": np.ascontiguousarray(
+                np.stack(camera_rotations, axis=0).astype(np.float32, copy=False)
+            ),
+            "camera_translation": np.ascontiguousarray(
+                np.stack(camera_translation_vectors, axis=0).astype(np.float32, copy=False)
+            ),
+            "camera_global_orient": np.ascontiguousarray(
+                np.stack(camera_global_orients, axis=0).astype(np.float32, copy=False)
+            ),
+            "camera_transl": np.ascontiguousarray(
+                np.stack(camera_translations, axis=0).astype(np.float32, copy=False)
+            ),
+        }
 
     @staticmethod
     def _select_dense_frame(
@@ -296,6 +400,28 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
         self._camera_cache[cache_key] = cached
         return cached
 
+    def _load_behave_view_camera(self, *, record, camera_id: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        split, index = self._behave_db_locator(record)
+        cache_key = (record.sequence_id, record.frame_id, camera_id, split, str(index))
+        cached = self._camera_cache.get(cache_key)
+        if cached is not None:
+            rotation, translation = cached
+            _, _, intrinsics = load_behave_camera(
+                self.joint_target_root,
+                split=split,
+                index=index,
+                camera_id=camera_id,
+            )
+            return rotation, translation, intrinsics
+        rotation, translation, intrinsics = load_behave_camera(
+            self.joint_target_root,
+            split=split,
+            index=index,
+            camera_id=camera_id,
+        )
+        self._camera_cache[cache_key] = (rotation, translation)
+        return rotation, translation, intrinsics
+
     def _build_stage2_input(self, payload: dict[str, np.ndarray]) -> np.ndarray:
         cached_input = payload.get("_stage2_input_cached")
         if cached_input is not None:
@@ -356,22 +482,74 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
         return feature
 
     def _load_joint_target(self, record, *, camera_ids: list[str]) -> dict[str, np.ndarray]:
-        cache_key = (record.sequence_id, record.frame_id)
+        camera_key = tuple(camera_ids)
+        cache_key = (record.sequence_id, record.frame_id, camera_key)
         cached = self._joint_target_cache.get(cache_key)
         if cached is not None:
             return cached
-        if self.joint_target_dataset != "mpi_inf_3dhp":
-            raise ValueError(f"Unsupported joint_target_dataset={self.joint_target_dataset!r}")
         if self.joint_target_root is None:
-            raise RuntimeError("joint_target_root must be configured for MPI-INF-3DHP joint targets")
-        cached = load_mpii3d_joint_target(
-            self.joint_target_root,
-            sequence_id=record.sequence_id,
-            frame_id=record.frame_id,
-            camera_ids=tuple(camera_ids),
-        )
+            raise RuntimeError(
+                f"joint_target_root must be configured for {self.joint_target_dataset} joint targets"
+            )
+        if self.joint_target_dataset == "mpi_inf_3dhp":
+            cached = load_mpii3d_joint_target(
+                self.joint_target_root,
+                sequence_id=record.sequence_id,
+                frame_id=record.frame_id,
+                camera_ids=camera_key,
+            )
+        elif self.joint_target_dataset == "behave":
+            split, index = self._behave_db_locator(record)
+            cached = load_behave_joint_target(
+                self.joint_target_root,
+                split=split,
+                index=index,
+                camera_ids=camera_key,
+            )
+        else:
+            raise ValueError(f"Unsupported joint_target_dataset={self.joint_target_dataset!r}")
         self._joint_target_cache[cache_key] = cached
         return cached
+
+    def _load_joint_2d_target(self, record, *, camera_ids: list[str]) -> dict[str, np.ndarray]:
+        camera_key = tuple(camera_ids)
+        cache_key = (record.sequence_id, record.frame_id, camera_key)
+        cached = self._joint_2d_target_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        if self.joint_target_root is None:
+            raise RuntimeError(
+                f"joint_target_root must be configured for {self.joint_target_dataset} joint targets"
+            )
+        if self.joint_target_dataset == "mpi_inf_3dhp":
+            cached = load_mpii3d_joint_2d_target(
+                self.joint_target_root,
+                sequence_id=record.sequence_id,
+                frame_id=record.frame_id,
+                camera_ids=camera_key,
+            )
+        elif self.joint_target_dataset == "behave":
+            split, index = self._behave_db_locator(record)
+            cached = load_behave_joint_2d_target(
+                self.joint_target_root,
+                split=split,
+                index=index,
+                camera_ids=camera_key,
+            )
+        else:
+            raise ValueError(f"Unsupported joint_target_dataset={self.joint_target_dataset!r}")
+        self._joint_2d_target_cache[cache_key] = cached
+        return cached
+
+    @staticmethod
+    def _behave_db_locator(record) -> tuple[str, int]:
+        metadata = record.metadata or {}
+        split = str(metadata.get("heatformer_db_split", record.split or "valid"))
+        if "heatformer_db_index" not in metadata:
+            raise KeyError(
+                f"Record {record.sample_id!r} is missing heatformer_db_index metadata"
+            )
+        return split, int(metadata["heatformer_db_index"])
 
     @staticmethod
     def _zero_smpl_target() -> dict[str, np.ndarray]:

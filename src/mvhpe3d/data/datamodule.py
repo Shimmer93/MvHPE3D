@@ -211,6 +211,7 @@ class Stage2DataConfig:
     split_name: str | None = None
     num_views: int = 2
     batch_size: int = 16
+    eval_batch_size: int | None = None
     num_workers: int = 0
     train_split: str = "train"
     val_split: str = "val"
@@ -219,6 +220,8 @@ class Stage2DataConfig:
     pin_memory: bool = True
     persistent_workers: bool = False
     drop_last_train: bool = True
+    drop_last_eval: bool = False
+    shuffle_train_views: bool = True
 
 
 @dataclass(slots=True)
@@ -275,6 +278,7 @@ class Stage2HuMManDataModule(L.LightningDataModule):
         if self.config.joint_target_smpl_joint_source in {
             "regressor",
             "regressor_headtop_proxy",
+            "body25_regressor15",
         }:
             if self.config.joint_target_joint_regressor_path is None:
                 raise ValueError(
@@ -319,7 +323,7 @@ class Stage2HuMManDataModule(L.LightningDataModule):
             self.train_dataset = HuMManStage2Dataset(
                 selected_records["train"],
                 num_views=self.config.num_views,
-                train=True,
+                train=self.config.shuffle_train_views,
                 gt_smpl_dir=gt_smpl_dir,
                 cameras_dir=cameras_dir,
                 input_smpl_cache_dir=input_smpl_cache_dir,
@@ -385,12 +389,22 @@ class Stage2HuMManDataModule(L.LightningDataModule):
     def val_dataloader(self) -> DataLoader:
         if self.val_dataset is None:
             raise RuntimeError("val_dataset is not initialized; call setup() first")
-        return self._build_dataloader(self.val_dataset, shuffle=False, drop_last=False)
+        return self._build_dataloader(
+            self.val_dataset,
+            shuffle=False,
+            drop_last=self.config.drop_last_eval,
+            batch_size=self._eval_batch_size(),
+        )
 
     def test_dataloader(self) -> DataLoader:
         if self.test_dataset is None:
             raise RuntimeError("test_dataset is not initialized; call setup('test') first")
-        return self._build_dataloader(self.test_dataset, shuffle=False, drop_last=False)
+        return self._build_dataloader(
+            self.test_dataset,
+            shuffle=False,
+            drop_last=self.config.drop_last_eval,
+            batch_size=self._eval_batch_size(),
+        )
 
     def _build_dataloader(
         self,
@@ -398,10 +412,11 @@ class Stage2HuMManDataModule(L.LightningDataModule):
         *,
         shuffle: bool,
         drop_last: bool,
+        batch_size: int | None = None,
     ) -> DataLoader:
         return DataLoader(
             dataset,
-            batch_size=self.config.batch_size,
+            batch_size=batch_size or self.config.batch_size,
             shuffle=shuffle,
             num_workers=self.config.num_workers,
             pin_memory=self.config.pin_memory,
@@ -411,6 +426,9 @@ class Stage2HuMManDataModule(L.LightningDataModule):
             drop_last=drop_last,
             collate_fn=multiview_collate,
         )
+
+    def _eval_batch_size(self) -> int:
+        return self.config.eval_batch_size or self.config.batch_size
 
     def _resolve_dataset_records(self, records: list) -> dict[str, list]:
         if self.config.split_config_path is not None:

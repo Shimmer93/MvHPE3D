@@ -114,7 +114,7 @@ def parse_args() -> argparse.Namespace:
         "--stage2-checkpoint-path",
         type=str,
         default=None,
-        help="Optional Stage 2 checkpoint path used by Stage 3 or RGB residual refinement",
+        help="Optional Stage 2 checkpoint path used by Stage 3 or residual refinement",
     )
     parser.add_argument(
         "--pred-camera-mode",
@@ -201,15 +201,15 @@ def build_data_config(
     if args.seed is not None:
         data_kwargs["seed"] = args.seed
     input_smpl_cache_dir = getattr(args, "input_smpl_cache_dir", None)
-    if data_name in {"humman_stage2", "humman_stage3", "mpi_inf_3dhp_stage2"} and input_smpl_cache_dir is not None:
+    if data_name in {"humman_stage2", "humman_stage3", "mpi_inf_3dhp_stage2", "behave_stage2"} and input_smpl_cache_dir is not None:
         data_kwargs["input_smpl_cache_dir"] = input_smpl_cache_dir
     rgb_feature_cache_dir = getattr(args, "rgb_feature_cache_dir", None)
-    if data_name in {"humman_stage2", "mpi_inf_3dhp_stage2"} and rgb_feature_cache_dir is not None:
+    if data_name in {"humman_stage2", "mpi_inf_3dhp_stage2", "behave_stage2"} and rgb_feature_cache_dir is not None:
         data_kwargs["rgb_feature_cache_dir"] = rgb_feature_cache_dir
 
     if data_name == "humman_stage3":
         return Stage3DataConfig(**data_kwargs)
-    if data_name in {"humman_stage2", "mpi_inf_3dhp_stage2"}:
+    if data_name in {"humman_stage2", "mpi_inf_3dhp_stage2", "behave_stage2"}:
         return Stage2DataConfig(**data_kwargs)
     return Stage1DataConfig(**data_kwargs)
 
@@ -256,6 +256,10 @@ def build_eval_trainer_config(
 ) -> dict[str, Any]:
     trainer_kwargs = dict(config)
     trainer_kwargs.pop("_config_path", None)
+    trainer_kwargs.pop("checkpoint_monitor", None)
+    trainer_kwargs.pop("checkpoint_mode", None)
+    trainer_kwargs.pop("checkpoint_save_top_k", None)
+    trainer_kwargs.pop("checkpoint_filename", None)
 
     if args.accelerator is not None:
         trainer_kwargs["accelerator"] = args.accelerator
@@ -301,6 +305,19 @@ def build_datamodule(data_config: Stage1DataConfig | Stage2DataConfig | Stage3Da
     return Stage1HuMManDataModule(data_config)
 
 
+
+def build_stage2_external_joint_kwargs(
+    data_config: Stage1DataConfig | Stage2DataConfig | Stage3DataConfig,
+) -> dict[str, object]:
+    if not isinstance(data_config, Stage2DataConfig):
+        return {}
+    return {
+        "external_joint_source": data_config.joint_target_smpl_joint_source,
+        "external_joint_regressor_path": data_config.joint_target_joint_regressor_path,
+        "external_headtop_topk": data_config.joint_target_headtop_topk,
+        "external_headtop_axis": data_config.joint_target_headtop_axis,
+    }
+
 def load_eval_module(
     *,
     checkpoint_path: str,
@@ -308,12 +325,14 @@ def load_eval_module(
     data_config: Stage1DataConfig | Stage2DataConfig | Stage3DataConfig,
     args: argparse.Namespace,
 ):
+    stage2_external_joint_kwargs = build_stage2_external_joint_kwargs(data_config)
     if isinstance(model_config, Stage2RRGBGuidedResidualRefinerConfig):
         kwargs = {
             "map_location": "cpu",
             "model_config": model_config,
             "smpl_model_path": args.smpl_model_path,
             "strict": False,
+            **stage2_external_joint_kwargs,
         }
         if args.stage2_checkpoint_path is not None:
             kwargs["stage2_checkpoint_path"] = args.stage2_checkpoint_path
@@ -343,6 +362,7 @@ def load_eval_module(
             map_location="cpu",
             model_config=model_config,
             smpl_model_path=args.smpl_model_path,
+            **stage2_external_joint_kwargs,
             strict=False,
         )
     return Stage1FusionLightningModule.load_from_checkpoint(
@@ -387,7 +407,7 @@ def is_stage2_or_stage3_experiment(experiment: dict[str, Any]) -> bool:
         "stage2r_rgb_guided_residual_refiner",
         "stage3_temporal_refine",
         "stage3_view_time_token",
-    } or data_name in {"humman_stage2", "humman_stage3", "mpi_inf_3dhp_stage2"}
+    } or data_name in {"humman_stage2", "humman_stage3", "mpi_inf_3dhp_stage2", "behave_stage2"}
 
 
 if __name__ == "__main__":

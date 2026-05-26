@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import lightning as L
+import torch
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, Logger, WandbLogger
 
@@ -155,6 +156,18 @@ def parse_args() -> argparse.Namespace:
         help="Optional Stage 2 checkpoint used by Stage 3 or RGB residual refinement",
     )
     parser.add_argument(
+        "--fit-ckpt-path",
+        type=str,
+        default=None,
+        help="Optional full Lightning checkpoint to warm-start or resume trainer.fit",
+    )
+    parser.add_argument(
+        "--init-ckpt-path",
+        type=str,
+        default=None,
+        help="Optional full Lightning checkpoint used only to initialize module weights",
+    )
+    parser.add_argument(
         "--test-after-train",
         action="store_true",
         help="Run a test pass immediately after training finishes",
@@ -199,10 +212,11 @@ def main() -> None:
         data_config=data_config,
         args=args,
     )
+    maybe_initialize_module_from_checkpoint(module, args.init_ckpt_path)
 
     trainer_config = build_trainer_config(experiment["trainer"], args, experiment["experiment_name"])
     trainer = L.Trainer(**trainer_config)
-    trainer.fit(module, datamodule=datamodule)
+    trainer.fit(module, datamodule=datamodule, ckpt_path=args.fit_ckpt_path)
     maybe_run_test_after_train(
         trainer,
         module=module,
@@ -233,16 +247,16 @@ def build_data_config(
         data_kwargs["seed"] = args.seed
     if args.fast_dev_run:
         data_kwargs["drop_last_train"] = False
-    if data_name in {"humman_stage2", "humman_stage3", "mpi_inf_3dhp_stage2"}:
+    if data_name in {"humman_stage2", "humman_stage3", "mpi_inf_3dhp_stage2", "behave_stage2"}:
         input_smpl_cache_dir = getattr(args, "input_smpl_cache_dir", None)
         if input_smpl_cache_dir is not None:
             data_kwargs["input_smpl_cache_dir"] = input_smpl_cache_dir
     rgb_feature_cache_dir = getattr(args, "rgb_feature_cache_dir", None)
-    if data_name in {"humman_stage2", "mpi_inf_3dhp_stage2"} and rgb_feature_cache_dir is not None:
+    if data_name in {"humman_stage2", "mpi_inf_3dhp_stage2", "behave_stage2"} and rgb_feature_cache_dir is not None:
         data_kwargs["rgb_feature_cache_dir"] = rgb_feature_cache_dir
     if data_name == "humman_stage3":
         return Stage3DataConfig(**data_kwargs)
-    if data_name in {"humman_stage2", "mpi_inf_3dhp_stage2"}:
+    if data_name in {"humman_stage2", "mpi_inf_3dhp_stage2", "behave_stage2"}:
         return Stage2DataConfig(**data_kwargs)
 
     return Stage1DataConfig(**data_kwargs)
@@ -604,6 +618,26 @@ def build_stage2_external_joint_kwargs(
     }
 
 
+def maybe_initialize_module_from_checkpoint(module, checkpoint_path: str | None) -> None:
+    if checkpoint_path is None:
+        return
+    path = Path(checkpoint_path).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"--init-ckpt-path does not exist: {path}")
+    try:
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(path, map_location="cpu")
+    state_dict = checkpoint.get("state_dict", checkpoint)
+    incompatible = module.load_state_dict(state_dict, strict=False)
+    print(
+        "Initialized module weights from "
+        f"{path} (missing={len(incompatible.missing_keys)}, "
+        f"unexpected={len(incompatible.unexpected_keys)})",
+        flush=True,
+    )
+
+
 def is_stage2_or_stage3_experiment(experiment: dict[str, Any]) -> bool:
     model_name = str(experiment.get("model", {}).get("name", ""))
     data_name = str(experiment.get("data", {}).get("name", ""))
@@ -614,7 +648,7 @@ def is_stage2_or_stage3_experiment(experiment: dict[str, Any]) -> bool:
         "stage2r_rgb_guided_residual_refiner",
         "stage3_temporal_refine",
         "stage3_view_time_token",
-    } or data_name in {"humman_stage2", "humman_stage3", "mpi_inf_3dhp_stage2"}
+    } or data_name in {"humman_stage2", "humman_stage3", "mpi_inf_3dhp_stage2", "behave_stage2"}
 
 
 if __name__ == "__main__":

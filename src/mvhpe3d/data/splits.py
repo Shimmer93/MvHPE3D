@@ -32,6 +32,7 @@ class SampleRecord:
     split: str | None = None
     subject_id: str | None = None
     action_id: str | None = None
+    metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,21 @@ def load_sample_records(manifest_path: str | Path) -> list[SampleRecord]:
             )
             for raw_view in raw_views
         )
+        metadata = {
+            key: value
+            for key, value in raw_record.items()
+            if key
+            not in {
+                "sample_id",
+                "sequence_id",
+                "frame_id",
+                "target_path",
+                "views",
+                "split",
+                "subject_id",
+                "action_id",
+            }
+        }
         records.append(
             SampleRecord(
                 sample_id=str(raw_record["sample_id"]),
@@ -117,6 +133,7 @@ def load_sample_records(manifest_path: str | Path) -> list[SampleRecord]:
                     if raw_record.get("action_id") is not None
                     else None
                 ),
+                metadata=metadata or None,
             )
         )
 

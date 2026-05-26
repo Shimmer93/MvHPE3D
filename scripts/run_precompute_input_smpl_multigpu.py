@@ -83,9 +83,7 @@ def run_shard(
     num_shards: int,
 ) -> dict[str, int | str]:
     command = [
-        "uv",
-        "run",
-        "python",
+        sys.executable,
         "scripts/precompute_input_smpl.py",
         "--manifest-path",
         args.manifest_path,
@@ -119,6 +117,7 @@ def run_shard(
     env.setdefault("OMP_NUM_THREADS", "1")
     env.setdefault("MKL_NUM_THREADS", "1")
     env.setdefault("PYTHONUNBUFFERED", "1")
+    env.setdefault("MOMENTUM_ENABLED", "0")
     completed = subprocess.run(command, cwd=REPO_ROOT, env=env)
     return {
         "gpu": gpu_id,

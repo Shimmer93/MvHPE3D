@@ -67,6 +67,10 @@ class Stage2LossConfig:
     input_projection_charbonnier_eps: float = 1e-3
     input_projection_min_depth: float = 0.1
     input_projection_border_px: float = 0.0
+    gt_projection_weight: float = 0.0
+    gt_projection_charbonnier_eps: float = 1e-3
+    gt_projection_min_depth: float = 0.1
+    gt_projection_border_px: float = 0.0
     supervise_betas: bool = True
 
 
