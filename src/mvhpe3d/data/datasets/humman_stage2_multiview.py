@@ -8,6 +8,10 @@ from typing import Any
 import numpy as np
 import torch
 
+from mvhpe3d.data.image_measurements import (
+    load_image_measurement_payload,
+    resolve_image_measurement_cache_path,
+)
 from mvhpe3d.data.rgb_features import (
     load_rgb_feature_payload,
     resolve_rgb_feature_cache_path,
@@ -20,6 +24,11 @@ from mvhpe3d.data.behave import (
     load_behave_camera,
     load_behave_joint_2d_target,
     load_behave_joint_target,
+)
+from mvhpe3d.data.h36m import (
+    load_h36m_camera,
+    load_h36m_joint_2d_target,
+    load_h36m_joint_target,
 )
 from mvhpe3d.utils import (
     CameraParameters,
@@ -55,6 +64,9 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
         cameras_dir: str | Path,
         input_smpl_cache_dir: str | Path,
         rgb_feature_cache_dir: str | Path | None = None,
+        image_measurement_cache_dir: str | Path | None = None,
+        segmentation_mask_cache_dir: str | Path | None = None,
+        pose_pca_coeff_target_path: str | Path | None = None,
         joint_target_dataset: str | None = None,
         joint_target_root: str | Path | None = None,
         joint_target_use_smpl_targets: bool = False,
@@ -74,6 +86,24 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
             if rgb_feature_cache_dir is not None
             else None
         )
+        self.image_measurement_cache_dir = (
+            Path(image_measurement_cache_dir).resolve()
+            if image_measurement_cache_dir is not None
+            else None
+        )
+        self.segmentation_mask_cache_dir = (
+            Path(segmentation_mask_cache_dir).resolve()
+            if segmentation_mask_cache_dir is not None
+            else None
+        )
+        self.pose_pca_coeff_target_path = (
+            Path(pose_pca_coeff_target_path).resolve()
+            if pose_pca_coeff_target_path is not None
+            else None
+        )
+        self.pose_pca_coeff_targets, self.pose_pca_coeff_dim = self._load_pose_pca_coeff_targets(
+            self.pose_pca_coeff_target_path
+        )
         self.joint_target_dataset = joint_target_dataset
         self.joint_target_root = Path(joint_target_root).resolve() if joint_target_root is not None else None
         self.joint_target_use_smpl_targets = bool(joint_target_use_smpl_targets)
@@ -81,6 +111,8 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
         self._stage2_input_cache: dict[str, np.ndarray] = {}
         self._canonical_target_cache: dict[tuple[str, str], dict[str, np.ndarray]] = {}
         self._rgb_feature_cache: dict[str, np.ndarray] = {}
+        self._image_measurement_cache: dict[str, dict[str, np.ndarray]] = {}
+        self._segmentation_mask_cache: dict[str, dict[str, np.ndarray]] = {}
         self._camera_cache: dict[tuple[str, str], tuple[np.ndarray, np.ndarray]] = {}
         self._joint_target_cache: dict[
             tuple[str, str, tuple[str, ...]],
@@ -104,6 +136,16 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
             "input_transl": [],
         }
         view_rgb_features: list[np.ndarray] = []
+        view_image_joint_features: list[np.ndarray] = []
+        view_image_joint_valid: list[np.ndarray] = []
+        view_image_joint_confidence: list[np.ndarray] = []
+        view_image_joint_uv: list[np.ndarray] = []
+        view_image_joint_projected_uv: list[np.ndarray] = []
+        view_image_mask_features: list[np.ndarray] = []
+        view_segmentation_masks: list[np.ndarray] = []
+        view_segmentation_distances: list[np.ndarray] = []
+        view_segmentation_bboxes: list[np.ndarray] = []
+        view_segmentation_valid: list[np.ndarray] = []
         camera_ids: list[str] = []
 
         for view in selected_views:
@@ -113,8 +155,8 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
             view_aux["pred_cam_t"].append(
                 self._require_field(payload, "pred_cam_t", expected_last_dim=3)
             )
-            if self.joint_target_dataset == "behave":
-                _, _, intrinsics = self._load_behave_view_camera(
+            if self.joint_target_dataset in {"behave", "h36m"}:
+                _, _, intrinsics = self._load_joint_dataset_view_camera(
                     record=record,
                     camera_id=view.camera_id,
                 )
@@ -131,8 +173,8 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
                 self._require_field(fitted_payload, "transl", expected_last_dim=3)
             )
             if self.uses_joint_targets:
-                if self.joint_target_dataset == "behave":
-                    camera_rotation, camera_translation, _ = self._load_behave_view_camera(
+                if self.joint_target_dataset in {"behave", "h36m"}:
+                    camera_rotation, camera_translation, _ = self._load_joint_dataset_view_camera(
                         record=record,
                         camera_id=view.camera_id,
                     )
@@ -151,6 +193,33 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
                         frame_id=record.frame_id,
                     )
                 )
+            if self.image_measurement_cache_dir is not None:
+                image_measurement = self._load_image_measurement(
+                    sequence_id=record.sequence_id,
+                    camera_id=view.camera_id,
+                    frame_id=record.frame_id,
+                )
+                view_image_joint_features.append(image_measurement["joint_features"])
+                view_image_joint_valid.append(image_measurement["valid"])
+                view_image_joint_confidence.append(
+                    image_measurement["joint_confidence"]
+                )
+                view_image_joint_uv.append(image_measurement["measured_uv"])
+                view_image_joint_projected_uv.append(
+                    image_measurement["projected_uv"]
+                )
+                if "mask_joint_features" in image_measurement:
+                    view_image_mask_features.append(image_measurement["mask_joint_features"])
+            if self.segmentation_mask_cache_dir is not None:
+                mask_payload = self._load_segmentation_mask_supervision(
+                    sequence_id=record.sequence_id,
+                    camera_id=view.camera_id,
+                    frame_id=record.frame_id,
+                )
+                view_segmentation_masks.append(mask_payload["mask"])
+                view_segmentation_distances.append(mask_payload["outside_distance"])
+                view_segmentation_bboxes.append(mask_payload["bbox"])
+                view_segmentation_valid.append(mask_payload["valid"])
             camera_ids.append(view.camera_id)
 
         if self.uses_joint_targets:
@@ -212,6 +281,49 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
             sample["view_rgb_feature"] = torch.from_numpy(
                 np.stack(view_rgb_features, axis=0)
             )
+        if self.image_measurement_cache_dir is not None:
+            sample["view_image_joint_feature"] = torch.from_numpy(
+                np.stack(view_image_joint_features, axis=0)
+            )
+            sample["view_image_joint_valid"] = torch.from_numpy(
+                np.stack(view_image_joint_valid, axis=0)
+            )
+            sample["view_image_joint_confidence"] = torch.from_numpy(
+                np.stack(view_image_joint_confidence, axis=0)
+            )
+            sample["view_image_joint_uv"] = torch.from_numpy(
+                np.stack(view_image_joint_uv, axis=0)
+            )
+            sample["view_image_joint_projected_uv"] = torch.from_numpy(
+                np.stack(view_image_joint_projected_uv, axis=0)
+            )
+            if view_image_mask_features:
+                if len(view_image_mask_features) != len(selected_views):
+                    raise ValueError(
+                        "Mask image features must be present for every selected view "
+                        f"of sample {record.sample_id}"
+                    )
+                sample["view_image_mask_feature"] = torch.from_numpy(
+                    np.stack(view_image_mask_features, axis=0)
+                )
+        if self.segmentation_mask_cache_dir is not None:
+            if len(view_segmentation_masks) != len(selected_views):
+                raise ValueError(
+                    "Segmentation mask supervision must be present for every selected "
+                    f"view of sample {record.sample_id}"
+                )
+            sample["view_segmentation_mask"] = torch.from_numpy(
+                np.stack(view_segmentation_masks, axis=0)
+            )
+            sample["view_segmentation_distance"] = torch.from_numpy(
+                np.stack(view_segmentation_distances, axis=0)
+            )
+            sample["view_segmentation_bbox"] = torch.from_numpy(
+                np.stack(view_segmentation_bboxes, axis=0)
+            )
+            sample["view_segmentation_valid"] = torch.from_numpy(
+                np.stack(view_segmentation_valid, axis=0)
+            )
         if joint_target is not None:
             sample["target_joints"] = torch.from_numpy(joint_target["joints"])
             sample["target_joint_confidence"] = torch.from_numpy(joint_target["confidence"])
@@ -237,7 +349,41 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
             sample["target_joints_2d_confidence"] = torch.from_numpy(
                 joint_2d_target["confidence"]
             )
+        if self.pose_pca_coeff_targets is not None:
+            target_pose_pca_coeff = self.pose_pca_coeff_targets.get(record.sample_id)
+            target_pose_pca_coeff_valid = target_pose_pca_coeff is not None
+            if target_pose_pca_coeff is None:
+                target_pose_pca_coeff = np.zeros(
+                    (self.pose_pca_coeff_dim,),
+                    dtype=np.float32,
+                )
+            sample["target_pose_pca_coeff"] = torch.from_numpy(target_pose_pca_coeff)
+            sample["target_pose_pca_coeff_valid"] = torch.as_tensor(
+                target_pose_pca_coeff_valid,
+                dtype=torch.bool,
+            )
         return sample
+
+    @staticmethod
+    def _load_pose_pca_coeff_targets(
+        path: Path | None,
+    ) -> tuple[dict[str, np.ndarray] | None, int]:
+        if path is None:
+            return None, 0
+        with np.load(path) as data:
+            if "sample_ids" not in data or "coeff" not in data:
+                raise KeyError(
+                    f"Pose PCA coefficient target file {path} must contain sample_ids and coeff"
+                )
+            sample_ids = [str(item) for item in data["sample_ids"].tolist()]
+            coeff = np.asarray(data["coeff"], dtype=np.float32)
+        if coeff.ndim != 2:
+            raise ValueError(f"Expected coeff shape [N, K], got {coeff.shape}")
+        if len(sample_ids) != coeff.shape[0]:
+            raise ValueError(
+                f"Expected one sample id per coeff row, got {len(sample_ids)} and {coeff.shape[0]}"
+            )
+        return {sample_id: np.ascontiguousarray(row) for sample_id, row in zip(sample_ids, coeff)}, int(coeff.shape[1])
 
     @property
     def uses_joint_targets(self) -> bool:
@@ -281,7 +427,7 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
         camera_ids: list[str],
         target_payload: dict[str, np.ndarray],
     ) -> dict[str, np.ndarray]:
-        if self.joint_target_dataset != "behave":
+        if self.joint_target_dataset not in {"behave", "h36m"}:
             return super()._build_camera_frame_target_aux(
                 record=record,
                 camera_ids=camera_ids,
@@ -299,7 +445,7 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
         camera_rotations = []
         camera_translation_vectors = []
         for camera_id in camera_ids:
-            rotation, translation, intrinsics = self._load_behave_view_camera(
+            rotation, translation, intrinsics = self._load_joint_dataset_view_camera(
                 record=record,
                 camera_id=camera_id,
             )
@@ -422,6 +568,38 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
         self._camera_cache[cache_key] = (rotation, translation)
         return rotation, translation, intrinsics
 
+    def _load_h36m_view_camera(self, *, record, camera_id: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        subject_id, _, _, _ = self._h36m_db_locator(record)
+        cache_key = (record.sequence_id, record.frame_id, camera_id, "h36m", subject_id)
+        cached = self._camera_cache.get(cache_key)
+        if cached is not None:
+            rotation, translation = cached
+            _, _, intrinsics = load_h36m_camera(
+                self.joint_target_root,
+                subject_id=subject_id,
+                camera_id=camera_id,
+            )
+            return rotation, translation, intrinsics
+        rotation, translation, intrinsics = load_h36m_camera(
+            self.joint_target_root,
+            subject_id=subject_id,
+            camera_id=camera_id,
+        )
+        self._camera_cache[cache_key] = (rotation, translation)
+        return rotation, translation, intrinsics
+
+    def _load_joint_dataset_view_camera(
+        self,
+        *,
+        record,
+        camera_id: str,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if self.joint_target_dataset == "behave":
+            return self._load_behave_view_camera(record=record, camera_id=camera_id)
+        if self.joint_target_dataset == "h36m":
+            return self._load_h36m_view_camera(record=record, camera_id=camera_id)
+        raise ValueError(f"Unsupported joint_target_dataset={self.joint_target_dataset!r}")
+
     def _build_stage2_input(self, payload: dict[str, np.ndarray]) -> np.ndarray:
         cached_input = payload.get("_stage2_input_cached")
         if cached_input is not None:
@@ -481,6 +659,82 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
         self._rgb_feature_cache[cache_key] = feature
         return feature
 
+    def _load_image_measurement(
+        self,
+        *,
+        sequence_id: str,
+        camera_id: str,
+        frame_id: str,
+    ) -> dict[str, np.ndarray]:
+        if self.image_measurement_cache_dir is None:
+            raise RuntimeError("image_measurement_cache_dir is not configured")
+        cache_path = resolve_image_measurement_cache_path(
+            self.image_measurement_cache_dir,
+            sequence_id=sequence_id,
+            camera_id=camera_id,
+            frame_id=frame_id,
+        )
+        cache_key = str(cache_path)
+        cached = self._image_measurement_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        payload = load_image_measurement_payload(cache_path)
+        self._image_measurement_cache[cache_key] = payload
+        return payload
+
+    def _load_segmentation_mask_supervision(
+        self,
+        *,
+        sequence_id: str,
+        camera_id: str,
+        frame_id: str,
+    ) -> dict[str, np.ndarray]:
+        if self.segmentation_mask_cache_dir is None:
+            raise RuntimeError("segmentation_mask_cache_dir is not configured")
+        cache_path = (
+            self.segmentation_mask_cache_dir / f"{sequence_id}_{camera_id}_{frame_id}.npz"
+        )
+        cache_key = str(cache_path)
+        cached = self._segmentation_mask_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        if not cache_path.exists():
+            raise FileNotFoundError(
+                f"Segmentation mask supervision cache file does not exist: {cache_path}"
+            )
+        with np.load(cache_path, allow_pickle=False) as payload:
+            required = {"mask", "outside_distance", "bbox", "valid"}
+            missing = sorted(required.difference(payload.files))
+            if missing:
+                raise KeyError(
+                    f"Segmentation mask cache {cache_path} is missing keys: {missing}"
+                )
+            mask = np.asarray(payload["mask"], dtype=np.float32)
+            outside_distance = np.asarray(payload["outside_distance"], dtype=np.float32)
+            bbox = np.asarray(payload["bbox"], dtype=np.float32)
+            valid = np.asarray(payload["valid"], dtype=bool)
+        if mask.ndim != 2:
+            raise ValueError(
+                f"Expected mask in {cache_path} to have shape [H, W], got {mask.shape}"
+            )
+        if outside_distance.shape != mask.shape:
+            raise ValueError(
+                f"Expected outside_distance in {cache_path} to match mask shape "
+                f"{mask.shape}, got {outside_distance.shape}"
+            )
+        if bbox.shape != (4,):
+            raise ValueError(f"Expected bbox in {cache_path} to have shape [4], got {bbox.shape}")
+        if valid.shape not in {(), (1,)}:
+            raise ValueError(f"Expected valid in {cache_path} to be scalar, got {valid.shape}")
+        payload = {
+            "mask": np.ascontiguousarray(mask),
+            "outside_distance": np.ascontiguousarray(outside_distance),
+            "bbox": np.ascontiguousarray(bbox),
+            "valid": np.asarray(bool(valid.reshape(-1)[0]), dtype=bool),
+        }
+        self._segmentation_mask_cache[cache_key] = payload
+        return payload
+
     def _load_joint_target(self, record, *, camera_ids: list[str]) -> dict[str, np.ndarray]:
         camera_key = tuple(camera_ids)
         cache_key = (record.sequence_id, record.frame_id, camera_key)
@@ -504,6 +758,16 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
                 self.joint_target_root,
                 split=split,
                 index=index,
+                camera_ids=camera_key,
+            )
+        elif self.joint_target_dataset == "h36m":
+            subject_id, action_id, subaction_id, frame_index = self._h36m_db_locator(record)
+            cached = load_h36m_joint_target(
+                self.joint_target_root,
+                subject_id=subject_id,
+                action_id=action_id,
+                subaction_id=subaction_id,
+                frame_index=frame_index,
                 camera_ids=camera_key,
             )
         else:
@@ -536,6 +800,16 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
                 index=index,
                 camera_ids=camera_key,
             )
+        elif self.joint_target_dataset == "h36m":
+            subject_id, action_id, subaction_id, frame_index = self._h36m_db_locator(record)
+            cached = load_h36m_joint_2d_target(
+                self.joint_target_root,
+                subject_id=subject_id,
+                action_id=action_id,
+                subaction_id=subaction_id,
+                frame_index=frame_index,
+                camera_ids=camera_key,
+            )
         else:
             raise ValueError(f"Unsupported joint_target_dataset={self.joint_target_dataset!r}")
         self._joint_2d_target_cache[cache_key] = cached
@@ -550,6 +824,31 @@ class HuMManStage2Dataset(HuMManStage1Dataset):
                 f"Record {record.sample_id!r} is missing heatformer_db_index metadata"
             )
         return split, int(metadata["heatformer_db_index"])
+
+    @staticmethod
+    def _h36m_db_locator(record) -> tuple[str, str, str, str]:
+        metadata = record.metadata or {}
+        missing_keys = [
+            key
+            for key in (
+                "h36m_subject_id",
+                "h36m_action_id",
+                "h36m_subaction_id",
+                "h36m_frame_index",
+            )
+            if key not in metadata
+        ]
+        if missing_keys:
+            raise KeyError(
+                f"Record {record.sample_id!r} is missing H36M metadata keys: "
+                + ", ".join(missing_keys)
+            )
+        return (
+            str(metadata["h36m_subject_id"]),
+            str(metadata["h36m_action_id"]),
+            str(metadata["h36m_subaction_id"]),
+            str(metadata["h36m_frame_index"]),
+        )
 
     @staticmethod
     def _zero_smpl_target() -> dict[str, np.ndarray]:

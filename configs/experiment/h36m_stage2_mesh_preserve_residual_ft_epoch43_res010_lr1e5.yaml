@@ -1,0 +1,42 @@
+name: h36m_stage2_mesh_preserve_residual_ft_epoch43_res010_lr1e5
+data:
+  config: configs/data/h36m_stage2_full.yaml
+model:
+  config: configs/model/stage2_joint_residual.yaml
+  learn_betas: true
+  pose_init_mode: input_residual
+  zero_init_residual_heads: true
+  proposal_delta_scale: 0.8
+  refinement_delta_scale: 0.8
+  betas_delta_scale: 1.0
+  predict_external_joint_residual: false
+loss:
+  pose_6d_weight: 0.02
+  betas_weight: 0.0
+  joint_weight: 1.0
+  pa_joint_weight: 0.2
+  articulation_weight: 0.0
+  init_pose_6d_weight: 0.0
+  init_betas_weight: 0.0
+  pose_residual_weight: 0.01
+  betas_residual_weight: 0.002
+  stage2_aux_weight: 0.0
+  camera_joint_weight: 0.0
+  camera_pa_joint_weight: 0.0
+  input_projection_weight: 0.0
+  gt_projection_weight: 0.05
+  image_projection_weight: 0.0
+  mask_supervision_weight: 0.0
+  mask_supervision_bbox_weight: 0.0
+  supervise_betas: false
+optimizer:
+  learning_rate: 1.0e-05
+  weight_decay: 1.0e-05
+trainer:
+  config: configs/trainer/default.yaml
+  max_epochs: 15
+  precision: '32'
+  gradient_clip_val: 0.5
+  gradient_clip_algorithm: norm
+  checkpoint_monitor: val/pa_mpjpe
+  checkpoint_mode: min

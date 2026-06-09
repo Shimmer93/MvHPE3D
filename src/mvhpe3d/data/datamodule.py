@@ -200,6 +200,9 @@ class Stage2DataConfig:
     cameras_dir: str | None = None
     input_smpl_cache_dir: str | None = None
     rgb_feature_cache_dir: str | None = None
+    image_measurement_cache_dir: str | None = None
+    segmentation_mask_cache_dir: str | None = None
+    pose_pca_coeff_target_path: str | None = None
     joint_target_dataset: str | None = None
     joint_target_root: str | None = None
     joint_target_use_smpl_targets: bool = False
@@ -305,6 +308,34 @@ class Stage2HuMManDataModule(L.LightningDataModule):
                 "RGB feature cache directory does not exist: "
                 f"{rgb_feature_cache_dir}. Run scripts/precompute_rgb_features.py first."
             )
+        image_measurement_cache_dir = self._resolve_image_measurement_cache_dir()
+        if (
+            image_measurement_cache_dir is not None
+            and not image_measurement_cache_dir.exists()
+        ):
+            raise FileNotFoundError(
+                "Image measurement cache directory does not exist: "
+                f"{image_measurement_cache_dir}. Run "
+                "scripts/precompute_joint_image_features.py first."
+            )
+        segmentation_mask_cache_dir = self._resolve_segmentation_mask_cache_dir()
+        if (
+            segmentation_mask_cache_dir is not None
+            and not segmentation_mask_cache_dir.exists()
+        ):
+            raise FileNotFoundError(
+                "Segmentation mask supervision cache directory does not exist: "
+                f"{segmentation_mask_cache_dir}. Run "
+                "scripts/precompute_h36m_mask_supervision.py first."
+            )
+        pose_pca_coeff_target_path = self._resolve_pose_pca_coeff_target_path()
+        if (
+            pose_pca_coeff_target_path is not None
+            and not pose_pca_coeff_target_path.exists()
+        ):
+            raise FileNotFoundError(
+                f"Pose PCA coefficient target file does not exist: {pose_pca_coeff_target_path}"
+            )
         if self.config.split_config_path is not None:
             split_config_path = Path(self.config.split_config_path)
             if not split_config_path.exists():
@@ -317,6 +348,9 @@ class Stage2HuMManDataModule(L.LightningDataModule):
         cameras_dir = self._resolve_cameras_dir()
         input_smpl_cache_dir = self._resolve_input_smpl_cache_dir()
         rgb_feature_cache_dir = self._resolve_rgb_feature_cache_dir()
+        image_measurement_cache_dir = self._resolve_image_measurement_cache_dir()
+        segmentation_mask_cache_dir = self._resolve_segmentation_mask_cache_dir()
+        pose_pca_coeff_target_path = self._resolve_pose_pca_coeff_target_path()
         joint_target_root = self._resolve_joint_target_root()
 
         if stage in (None, "fit"):
@@ -328,6 +362,9 @@ class Stage2HuMManDataModule(L.LightningDataModule):
                 cameras_dir=cameras_dir,
                 input_smpl_cache_dir=input_smpl_cache_dir,
                 rgb_feature_cache_dir=rgb_feature_cache_dir,
+                image_measurement_cache_dir=image_measurement_cache_dir,
+                segmentation_mask_cache_dir=segmentation_mask_cache_dir,
+                pose_pca_coeff_target_path=pose_pca_coeff_target_path,
                 joint_target_dataset=self.config.joint_target_dataset,
                 joint_target_root=joint_target_root,
                 joint_target_use_smpl_targets=self.config.joint_target_use_smpl_targets,
@@ -341,6 +378,9 @@ class Stage2HuMManDataModule(L.LightningDataModule):
                 cameras_dir=cameras_dir,
                 input_smpl_cache_dir=input_smpl_cache_dir,
                 rgb_feature_cache_dir=rgb_feature_cache_dir,
+                image_measurement_cache_dir=image_measurement_cache_dir,
+                segmentation_mask_cache_dir=segmentation_mask_cache_dir,
+                pose_pca_coeff_target_path=pose_pca_coeff_target_path,
                 joint_target_dataset=self.config.joint_target_dataset,
                 joint_target_root=joint_target_root,
                 joint_target_use_smpl_targets=self.config.joint_target_use_smpl_targets,
@@ -356,6 +396,9 @@ class Stage2HuMManDataModule(L.LightningDataModule):
                 cameras_dir=cameras_dir,
                 input_smpl_cache_dir=input_smpl_cache_dir,
                 rgb_feature_cache_dir=rgb_feature_cache_dir,
+                image_measurement_cache_dir=image_measurement_cache_dir,
+                segmentation_mask_cache_dir=segmentation_mask_cache_dir,
+                pose_pca_coeff_target_path=pose_pca_coeff_target_path,
                 joint_target_dataset=self.config.joint_target_dataset,
                 joint_target_root=joint_target_root,
                 joint_target_use_smpl_targets=self.config.joint_target_use_smpl_targets,
@@ -371,6 +414,9 @@ class Stage2HuMManDataModule(L.LightningDataModule):
                 cameras_dir=cameras_dir,
                 input_smpl_cache_dir=input_smpl_cache_dir,
                 rgb_feature_cache_dir=rgb_feature_cache_dir,
+                image_measurement_cache_dir=image_measurement_cache_dir,
+                segmentation_mask_cache_dir=segmentation_mask_cache_dir,
+                pose_pca_coeff_target_path=pose_pca_coeff_target_path,
                 joint_target_dataset=self.config.joint_target_dataset,
                 joint_target_root=joint_target_root,
                 joint_target_use_smpl_targets=self.config.joint_target_use_smpl_targets,
@@ -484,6 +530,21 @@ class Stage2HuMManDataModule(L.LightningDataModule):
         if self.config.rgb_feature_cache_dir is None:
             return None
         return Path(self.config.rgb_feature_cache_dir).resolve()
+
+    def _resolve_image_measurement_cache_dir(self) -> Path | None:
+        if self.config.image_measurement_cache_dir is None:
+            return None
+        return Path(self.config.image_measurement_cache_dir).resolve()
+
+    def _resolve_segmentation_mask_cache_dir(self) -> Path | None:
+        if self.config.segmentation_mask_cache_dir is None:
+            return None
+        return Path(self.config.segmentation_mask_cache_dir).resolve()
+
+    def _resolve_pose_pca_coeff_target_path(self) -> Path | None:
+        if self.config.pose_pca_coeff_target_path is None:
+            return None
+        return Path(self.config.pose_pca_coeff_target_path).resolve()
 
     def _resolve_joint_target_root(self) -> Path:
         if self.config.joint_target_root is not None:

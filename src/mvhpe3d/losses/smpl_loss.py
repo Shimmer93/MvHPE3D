@@ -57,12 +57,18 @@ class Stage2LossConfig:
     pose_6d_weight: float = 1.0
     betas_weight: float = 0.1
     joint_weight: float = 1.0
+    pa_joint_weight: float = 0.0
+    canonical_pseudo_joint_weight: float = 0.0
+    canonical_pseudo_pa_joint_weight: float = 0.0
+    camera_pa_joint_weight: float = 0.0
     articulation_weight: float = 0.0
     init_pose_6d_weight: float = 0.25
     init_betas_weight: float = 0.025
     pose_residual_weight: float = 0.0
     betas_residual_weight: float = 0.0
+    pose_pca_coeff_weight: float = 0.0
     stage2_aux_weight: float = 0.0
+    camera_joint_weight: float = 0.0
     input_projection_weight: float = 0.0
     input_projection_charbonnier_eps: float = 1e-3
     input_projection_min_depth: float = 0.1
@@ -71,6 +77,28 @@ class Stage2LossConfig:
     gt_projection_charbonnier_eps: float = 1e-3
     gt_projection_min_depth: float = 0.1
     gt_projection_border_px: float = 0.0
+    image_projection_weight: float = 0.0
+    image_projection_charbonnier_eps: float = 1e-3
+    image_projection_min_depth: float = 0.1
+    image_projection_border_px: float = 0.0
+    image_projection_confidence_threshold: float = 0.2
+    projected_measurement_weight: float = 0.0
+    projected_measurement_consistency_weight: float = 0.0
+    projected_measurement_uncertainty_weight: float = 0.01
+    projected_measurement_charbonnier_eps: float = 1e-3
+    projected_measurement_consistency_charbonnier_eps: float = 1e-3
+    projected_measurement_confidence_threshold: float = 0.2
+    projected_measurement_min_depth: float = 0.1
+    projected_measurement_border_px: float = 0.0
+    mask_supervision_weight: float = 0.0
+    mask_supervision_bbox_weight: float = 0.0
+    mask_supervision_sample_count: int = 512
+    mask_supervision_min_depth: float = 0.1
+    mask_supervision_border_px: float = 0.0
+    adapter_aux_joint_weight: float = 0.0
+    adapter_aux_pa_joint_weight: float = 0.0
+    triangulated_joint_weight: float = 0.0
+    triangulated_pa_joint_weight: float = 0.0
     supervise_betas: bool = True
 
 

@@ -150,6 +150,15 @@ def parse_args() -> argparse.Namespace:
         help="Optional Stage 2 RGB feature cache directory from scripts/precompute_rgb_features.py",
     )
     parser.add_argument(
+        "--image-measurement-cache-dir",
+        type=str,
+        default=None,
+        help=(
+            "Optional Stage 2 joint image measurement cache directory from "
+            "scripts/precompute_joint_image_features.py"
+        ),
+    )
+    parser.add_argument(
         "--stage2-checkpoint-path",
         type=str,
         default=None,
@@ -247,16 +256,19 @@ def build_data_config(
         data_kwargs["seed"] = args.seed
     if args.fast_dev_run:
         data_kwargs["drop_last_train"] = False
-    if data_name in {"humman_stage2", "humman_stage3", "mpi_inf_3dhp_stage2", "behave_stage2"}:
+    if data_name in {"humman_stage2", "humman_stage3", "mpi_inf_3dhp_stage2", "behave_stage2", "h36m_stage2"}:
         input_smpl_cache_dir = getattr(args, "input_smpl_cache_dir", None)
         if input_smpl_cache_dir is not None:
             data_kwargs["input_smpl_cache_dir"] = input_smpl_cache_dir
     rgb_feature_cache_dir = getattr(args, "rgb_feature_cache_dir", None)
-    if data_name in {"humman_stage2", "mpi_inf_3dhp_stage2", "behave_stage2"} and rgb_feature_cache_dir is not None:
+    if data_name in {"humman_stage2", "mpi_inf_3dhp_stage2", "behave_stage2", "h36m_stage2"} and rgb_feature_cache_dir is not None:
         data_kwargs["rgb_feature_cache_dir"] = rgb_feature_cache_dir
+    image_measurement_cache_dir = getattr(args, "image_measurement_cache_dir", None)
+    if data_name in {"humman_stage2", "mpi_inf_3dhp_stage2", "behave_stage2", "h36m_stage2"} and image_measurement_cache_dir is not None:
+        data_kwargs["image_measurement_cache_dir"] = image_measurement_cache_dir
     if data_name == "humman_stage3":
         return Stage3DataConfig(**data_kwargs)
-    if data_name in {"humman_stage2", "mpi_inf_3dhp_stage2", "behave_stage2"}:
+    if data_name in {"humman_stage2", "mpi_inf_3dhp_stage2", "behave_stage2", "h36m_stage2"}:
         return Stage2DataConfig(**data_kwargs)
 
     return Stage1DataConfig(**data_kwargs)
@@ -316,8 +328,8 @@ def build_loss_config(
     model_config: (
         Stage1MLPFusionConfig
         | Stage1ResidualFusionConfig
-        | Stage2JointGraphRefinerConfig
-        | Stage2JointResidualConfig
+            | Stage2JointGraphRefinerConfig
+            | Stage2JointResidualConfig
         | Stage2ParamRefineConfig
         | Stage2RRGBGuidedResidualRefinerConfig
         | Stage3TemporalRefineConfig
@@ -356,8 +368,8 @@ def build_optimization_config(
     model_config: (
         Stage1MLPFusionConfig
         | Stage1ResidualFusionConfig
-        | Stage2JointGraphRefinerConfig
-        | Stage2JointResidualConfig
+            | Stage2JointGraphRefinerConfig
+            | Stage2JointResidualConfig
         | Stage2ParamRefineConfig
         | Stage2RRGBGuidedResidualRefinerConfig
         | Stage3TemporalRefineConfig
@@ -583,7 +595,7 @@ def build_lightning_module(
     if isinstance(
         model_config,
         (
-            Stage2ParamRefineConfig,
+                    Stage2ParamRefineConfig,
             Stage2JointResidualConfig,
             Stage2JointGraphRefinerConfig,
         ),
@@ -648,7 +660,7 @@ def is_stage2_or_stage3_experiment(experiment: dict[str, Any]) -> bool:
         "stage2r_rgb_guided_residual_refiner",
         "stage3_temporal_refine",
         "stage3_view_time_token",
-    } or data_name in {"humman_stage2", "humman_stage3", "mpi_inf_3dhp_stage2", "behave_stage2"}
+    } or data_name in {"humman_stage2", "humman_stage3", "mpi_inf_3dhp_stage2", "behave_stage2", "h36m_stage2"}
 
 
 if __name__ == "__main__":
